@@ -20,6 +20,7 @@ class ConfigFile:
     mode: str
     enabled: bool
     download_url: str
+    profile: str = ""
 
 
 @dataclass(frozen=True)
@@ -68,10 +69,11 @@ def load_config_manifest(manifest_url: str, cache_version: str = "") -> ConfigMa
             mode=mode,
             enabled=entry.get("enabled") is True,
             download_url=validate_url(_required(entry, "download_url", label), label),
+            profile=str(entry.get("profile", "")).strip(),
         ))
-    paths = [item.path.as_posix().casefold() for item in files]
+    paths = [(item.path.as_posix().casefold(), item.profile.casefold()) for item in files]
     if len(paths) != len(set(paths)):
-        raise RuntimeError("configs.json contient des chemins dupliqués")
+        raise RuntimeError("configs.json contient des chemins/profils dupliqués")
     return ConfigManifest(files)
 
 
@@ -80,6 +82,7 @@ def sync_config_folder(
     target_subdir: str = CONFIG_DIR_NAME,
     download_callback: FileProgressCallback | None = None,
     manifest: ConfigManifest | None = None,
+    profile: str = "",
 ) -> ConfigResult:
     target_root = get_install_subdir(installation_name, target_subdir)
     target_root.mkdir(parents=True, exist_ok=True)
@@ -91,7 +94,14 @@ def sync_config_folder(
         installed = []
         managed = []
         downloads = []
+        candidates = [item for item in manifest.files if not item.profile or item.profile == profile]
+        specific_paths = {item.path for item in candidates if item.profile == profile and profile}
+        selected = [item for item in candidates if item.profile or item.path not in specific_paths]
         for item in manifest.files:
+            if item not in selected:
+                suffix = f" ({item.profile})" if item.profile else " (variante commune remplacée)"
+                info(f" - [CONFIG] Variante ignorée: {item.path}{suffix}")
+        for item in selected:
             target = target_root / item.path
             if item.mode == "optional" and not item.enabled:
                 info(f" - [CONFIG] Optionnelle ignorée: {item.path}")

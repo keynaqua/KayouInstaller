@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import stat
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -138,6 +139,9 @@ def _classic_uninstall(modpack_info: ModpackInfo) -> None:
 def _full_uninstall(modpack_info: ModpackInfo) -> None:
     game_dir = _installation_path(modpack_info)
     if game_dir.exists():
+        override_config = game_dir / "config" / "resourcepackoverrides.json"
+        if override_config.exists():
+            override_config.chmod(stat.S_IREAD | stat.S_IWRITE)
         shutil.rmtree(game_dir)
         success(f"Dossier du modpack supprime: {game_dir}")
     else:

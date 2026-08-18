@@ -347,6 +347,7 @@ def open_settings(root, modpack: CatalogEntry, options: dict, on_save):
     safe = tk.BooleanVar(value=options.get("safe_mode", False))
     resources = tk.BooleanVar(value=options.get("activate_resourcepacks", True))
     shader = tk.BooleanVar(value=options.get("activate_shader", True))
+    interface_pack = tk.StringVar(value=options.get("visual_profile", options.get("interface_pack", "flowery")))
     selected_world = tk.StringVar(value=options.get("datapack_world", ""))
     total_ram = get_total_ram_gb()
     minimum_ram, maximum_ram = get_ram_limits()
@@ -355,13 +356,26 @@ def open_settings(root, modpack: CatalogEntry, options: dict, on_save):
     ram = tk.IntVar(value=selected_ram)
     tk.Label(card, text="Réglages d'installation", bg=PALETTE["surface"], fg=PALETTE["text"], font=(GUI_FONT_SEMIBOLD, 22)).grid(row=0, column=0, sticky="w")
     tk.Label(card, text="Personnalise le contenu avant de lancer l'installation.", bg=PALETTE["surface"], fg=PALETTE["muted"], font=(GUI_FONT, 10)).grid(row=1, column=0, sticky="w", pady=(5, 16))
-    box = RoundedPanel(card, PALETTE["surface_alt"], radius=8, border=PALETTE["border"], height=186)
+    # Le profil visuel est choisi sur l'écran principal depuis profiles.json.
+    has_interface_choice = False
+    box = RoundedPanel(card, PALETTE["surface_alt"], radius=8, border=PALETTE["border"], height=270 if has_interface_choice else 186)
     box.grid(row=2, column=0, sticky="ew")
     settings = box.content
     settings.config(padx=18, pady=12)
     settings.grid_columnconfigure(0, weight=1)
     for row, (text, variable) in enumerate((("Packs de ressources", resources), ("Shader au lancement", shader), ("Safemode", safe))):
         Switch(settings, text, variable).grid(row=row, column=0, sticky="ew")
+    if has_interface_choice:
+        tk.Label(settings, text="PROFIL VISUEL", bg=PALETTE["surface_alt"], fg=PALETTE["muted"], font=(GUI_FONT_SEMIBOLD, 9)).grid(row=3, column=0, sticky="w", pady=(8, 2))
+        choices = tk.Frame(settings, bg=PALETTE["surface_alt"])
+        choices.grid(row=4, column=0, sticky="w")
+        for column, (text, value) in enumerate((("Overgrown + Extra Flowery", "flowery"), ("Simple Hotbar", "simple_hotbar"))):
+            tk.Radiobutton(
+                choices, text=text, value=value, variable=interface_pack,
+                bg=PALETTE["surface_alt"], fg=PALETTE["text"], selectcolor=PALETTE["surface"],
+                activebackground=PALETTE["surface_alt"], activeforeground=PALETTE["text"],
+                font=(GUI_FONT, 10), cursor="hand2",
+            ).grid(row=0, column=column, padx=(0, 18))
     ram_box = RoundedPanel(card, PALETTE["surface_alt"], radius=8, border=PALETTE["border"], height=140)
     ram_box.grid(row=3, column=0, sticky="ew", pady=(14, 0))
     ram_row = ram_box.content
@@ -400,7 +414,8 @@ def open_settings(root, modpack: CatalogEntry, options: dict, on_save):
             if not (path / "level.dat").is_file():
                 messagebox.showerror("Monde introuvable", f"Le monde '{world}' n'existe plus. Choisis ou crée un monde valide.", parent=window)
                 return
-        options.update(safe_mode=safe.get(), activate_resourcepacks=resources.get(), activate_shader=shader.get(), datapack_world=selected_world.get(), ram_gb=ram.get())
+        options.update(safe_mode=safe.get(), activate_resourcepacks=resources.get(), activate_shader=shader.get(), visual_profile=interface_pack.get(), datapack_world=selected_world.get(), ram_gb=ram.get())
+        options.pop("interface_pack", None)
         on_save()
         window.destroy()
 

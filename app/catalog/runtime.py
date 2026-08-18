@@ -28,6 +28,7 @@ class CatalogEntry:
     size_bytes: int | None = None
     base_url: str = ""
     manifests: dict[str, str] | None = None
+    resourcepack_activation_ids: tuple[str, ...] = ()
     update_status: str = "Non installé"
 
 
@@ -74,6 +75,11 @@ def _parse(data: object) -> list[CatalogEntry]:
                 for key, value in entry.get("manifests", {}).items()
                 if isinstance(key, str) and isinstance(value, str) and value.strip()
             } if isinstance(entry.get("manifests"), dict) else {},
+            resourcepack_activation_ids=tuple(
+                value.strip()
+                for value in entry.get("resourcepack_activation_ids", [])
+                if isinstance(value, str) and value.strip()
+            ) if isinstance(entry.get("resourcepack_activation_ids"), list) else (),
         )
         if enabled and not pack.manifests:
             raise RuntimeError(f"catalog.json: modpacks[{index}].manifests invalide")

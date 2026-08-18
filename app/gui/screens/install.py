@@ -1,8 +1,11 @@
 import os
+import io
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog
+
+from PIL import Image, ImageDraw, ImageTk
 
 from config import CACHE_DIR_NAME, GUI_FONT, GUI_FONT_SEMIBOLD, INSTALLATIONS_DIR_NAME, PALETTE, get_minecraft_dir
 from gui.components import RoundedPanel, RoundedProgress, SmoothScrollbar, create_button
@@ -10,12 +13,66 @@ from gui.core.state import log_queue
 from utils.resources import resource_path
 
 
+class PackChoiceCard(tk.Canvas):
+    def __init__(self, parent, title, subtitle, value, preview_path, variable, command):
+        super().__init__(parent, height=92, bg=parent.cget("bg"), bd=0, highlightthickness=0, cursor="hand2")
+        self.title, self.subtitle, self.value = title, subtitle, value
+        self.preview_path, self.variable, self.command = preview_path, variable, command
+        self.hovered = False
+        self.bind("<Button-1>", self._select)
+        self.bind("<Enter>", lambda _event: self._set_hover(True))
+        self.bind("<Leave>", lambda _event: self._set_hover(False))
+        self.bind("<Configure>", self._draw)
+
+    def _select(self, _event=None):
+        self.variable.set(self.value)
+        self.command()
+
+    def _set_hover(self, value):
+        self.hovered = value
+        self._draw()
+
+    def _draw(self, _event=None):
+        width, height, scale = max(260, self.winfo_width()), 92, 4
+        selected = self.variable.get() == self.value
+        image = Image.new("RGB", (width * scale, height * scale), self.cget("bg"))
+        draw = ImageDraw.Draw(image)
+        border = PALETTE["accent"] if selected else PALETTE["button_alt_hover"] if self.hovered else PALETTE["border"]
+        fill = PALETTE["button_alt"] if selected or self.hovered else PALETTE["surface_alt"]
+        draw.rounded_rectangle((2 * scale, 2 * scale, (width - 3) * scale, (height - 3) * scale), radius=13 * scale, fill=fill, outline=border, width=(2 if selected else 1) * scale)
+
+        size, left, top = 66 * scale, 14 * scale, 13 * scale
+        try:
+            source = io.BytesIO(self.preview_path) if isinstance(self.preview_path, bytes) else self.preview_path
+            preview = Image.open(source).convert("RGB")
+            side = min(preview.size)
+            x, y = (preview.width - side) // 2, (preview.height - side) // 2
+            preview = preview.crop((x, y, x + side, y + side)).resize((size, size), Image.Resampling.LANCZOS)
+            mask = Image.new("L", (size, size), 0)
+            ImageDraw.Draw(mask).rounded_rectangle((0, 0, size - 1, size - 1), radius=9 * scale, fill=255)
+            image.paste(preview, (left, top), mask)
+        except (OSError, ValueError):
+            draw.rounded_rectangle((left, top, left + size, top + size), radius=9 * scale, fill=PALETTE["button_disabled"])
+
+        cx, cy, radius = (width - 22) * scale, (height // 2) * scale, 10 * scale
+        draw.ellipse((cx - radius, cy - radius, cx + radius, cy + radius), fill=PALETTE["accent"] if selected else PALETTE["surface"], outline=PALETTE["accent"] if selected else PALETTE["muted"], width=2 * scale)
+        if selected:
+            draw.line(((cx - 5 * scale, cy), (cx - scale, cy + 4 * scale), (cx + 6 * scale, cy - 5 * scale)), fill="#ffffff", width=2 * scale, joint="curve")
+
+        image = image.resize((width, height), Image.Resampling.LANCZOS)
+        self._surface = ImageTk.PhotoImage(image, master=self)
+        self.delete("all")
+        self.create_image(0, 0, image=self._surface, anchor="nw")
+        self.create_text(94, 34, text=self.title, fill=PALETTE["text"], font=(GUI_FONT_SEMIBOLD, 11), anchor="w")
+        self.create_text(94, 57, text=self.subtitle, fill=PALETTE["muted"], font=(GUI_FONT, 9), anchor="w")
+
+
 def _mb(value: int) -> float:
     return value / 1024 / 1024
 
 
 class InstallationScreen:
-    def __init__(self, parent, root, modpack, logo, loader_logo, options, on_start, on_settings, on_open_launcher, on_back, on_success):
+    def __init__(self, parent, root, modpack, logo, loader_logo, options, on_start, on_settings, on_open_launcher, on_back, on_success, on_options_changed=None, profiles=None, profile_logos=None):
         self.parent = parent
         self.root = root
         self.modpack = modpack
@@ -27,6 +84,9 @@ class InstallationScreen:
         self.on_open_launcher = on_open_launcher
         self.on_back = on_back
         self.on_success = on_success
+        self.on_options_changed = on_options_changed
+        self.profiles = profiles
+        self.profile_logos = profile_logos or {}
         self.state = None
         self.screen = None
         self.downloads = {}
@@ -38,6 +98,7 @@ class InstallationScreen:
         self.active_stage = None
         self.emoji_images = {}
         self.world_icon = None
+        self.pack_preview_images = []
         self.total_size_mb = modpack.size_mb
         self.final_size_mb = None
 
@@ -60,10 +121,15 @@ class InstallationScreen:
         scrollbar = SmoothScrollbar(self.screen, viewport.yview)
         viewport.configure(yscrollcommand=scrollbar.set)
         viewport.grid(row=0, column=0, sticky="nsew")
+        self.viewport = viewport
         holder = tk.Frame(viewport, bg=PALETTE["bg"])
+        self.viewport_holder = holder
         holder.grid_columnconfigure(0, weight=1)
         holder_window = viewport.create_window(0, 0, anchor="nw", window=holder)
-        base_shell_height = 730
+        has_declared_profiles = bool(self.profiles and self.profiles.profiles)
+        profile_count = len(self.profiles.profiles) if has_declared_profiles else (2 if self.modpack.id == "cozy_adventure" else 0)
+        profile_rows = (profile_count + 1) // 2
+        base_shell_height = 780 + profile_rows * 106 if profile_count else 730
         self.stage_extra_height = 0
         shell = RoundedPanel(holder, PALETTE["surface"], radius=8, border=PALETTE["border"], height=base_shell_height)
         self.shell = shell
@@ -102,7 +168,7 @@ class InstallationScreen:
             tk.Label(brand, image=self.logo, bg=PALETTE["surface"]).grid(row=0, column=0, rowspan=2, padx=(0, 24))
         tk.Label(brand, text=self.modpack.name, bg=PALETTE["surface"], fg=PALETTE["text"], font=(GUI_FONT_SEMIBOLD, 30)).grid(row=0, column=1, sticky="sw")
         tk.Label(brand, text=self.modpack.description, bg=PALETTE["surface"], fg=PALETTE["muted"], font=(GUI_FONT, 11), wraplength=760, justify="left").grid(row=1, column=1, sticky="nw", pady=(6, 0))
-        info_panel = RoundedPanel(card, PALETTE["surface_alt"], radius=8, border=PALETTE["border"], height=238)
+        info_panel = RoundedPanel(card, PALETTE["surface_alt"], radius=8, border=PALETTE["border"], height=290 + profile_rows * 106 if profile_count else 238)
         info_panel.grid(row=1, column=0, sticky="ew", pady=(24, 18))
         info = info_panel.content
         info.config(padx=18, pady=12)
@@ -137,6 +203,31 @@ class InstallationScreen:
             value = tk.Label(cell, bg=PALETTE["surface_alt"], fg=PALETTE["text"], font=(GUI_FONT, 10), anchor="center")
             value.grid(row=1, column=0, sticky="ew", pady=(5, 0))
             self.option_values[key] = value
+        if profile_count:
+            interface_row = tk.Frame(info, bg=PALETTE["surface_alt"])
+            interface_row.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(12, 0))
+            tk.Label(interface_row, text="PROFIL VISUEL", bg=PALETTE["surface_alt"], fg=PALETTE["muted"], font=(GUI_FONT_SEMIBOLD, 9)).grid(row=0, column=0, columnspan=2, sticky="w", padx=4, pady=(0, 7))
+            fallback = self.profiles.default if has_declared_profiles else "flowery"
+            self.interface_pack_var = tk.StringVar(value=self.options.get("visual_profile", self.options.get("interface_pack", fallback)))
+            self.pack_choice_cards = []
+            declared = [
+                (profile.name, f"{len(profile.resourcepacks)} pack(s)" + (" · shader inclus" if profile.shader else ""), profile.id, self.profile_logos.get(profile.id))
+                for profile in self.profiles.profiles
+            ] if has_declared_profiles else [
+                ("Flowery", "Packs fleuris", "flowery", resource_path("assets/resourcepacks/flowery.png")),
+                ("Simple Hotbar", "Interface épurée", "simple_hotbar", resource_path("assets/resourcepacks/simple_hotbar.png")),
+            ]
+            for column in range(4):
+                interface_row.grid_columnconfigure(column, weight=1, uniform="pack-choice")
+            for index, (title, subtitle, value, preview) in enumerate(declared):
+                row = 1 + index // 2
+                column = 1 if len(declared) % 2 and index == len(declared) - 1 else (index % 2) * 2
+                choice = PackChoiceCard(
+                    interface_row, title, subtitle, value, preview or "",
+                    self.interface_pack_var, self._change_interface_pack,
+                )
+                choice.grid(row=row, column=column, columnspan=2, sticky="ew", padx=6, pady=(0, 8))
+                self.pack_choice_cards.append(choice)
         progress_panel = RoundedPanel(card, PALETTE["surface_alt"], radius=8, border=PALETTE["border"], height=180)
         self.progress_panel = progress_panel
         progress_panel.grid(row=2, column=0, sticky="ew")
@@ -215,6 +306,16 @@ class InstallationScreen:
                 except (OSError, tk.TclError):
                     pass
         self.option_values["datapacks"].config(text=world, image=self.world_icon or "", compound="left", padx=6)
+        if hasattr(self, "interface_pack_var"):
+            self.interface_pack_var.set(self.options.get("visual_profile", self.options.get("interface_pack", "flowery")))
+
+    def _change_interface_pack(self):
+        self.options["visual_profile"] = self.interface_pack_var.get()
+        self.options.pop("interface_pack", None)
+        for card in getattr(self, "pack_choice_cards", []):
+            card._draw()
+        if self.on_options_changed:
+            self.on_options_changed()
 
     @staticmethod
     def _status_color(status: str):
@@ -239,6 +340,19 @@ class InstallationScreen:
             button.config(state="disabled", cursor="")
         self.status.config(text="Préparation de l'installation...", fg=PALETTE["text"])
         self.message.config(text="Le lanceur restera fermé jusqu'à la fin.", fg=PALETTE["muted"])
+        self.root.after_idle(self._scroll_to_progress)
+        self.root.after(180, self._scroll_to_progress)
+
+    def _scroll_to_progress(self):
+        if not self.screen or not self.screen.winfo_exists():
+            return
+        self.root.update_idletasks()
+        bbox = self.viewport.bbox("all")
+        if not bbox or bbox[3] <= self.viewport.winfo_height():
+            return
+        bar_bottom = self.progress_bar.winfo_rooty() - self.viewport_holder.winfo_rooty() + self.progress_bar.winfo_height()
+        target = max(0, bar_bottom - self.viewport.winfo_height() + 90)
+        self.viewport.yview_moveto(min(1.0, target / bbox[3]))
 
     def _write(self, text: str):
         self.log_lines.append(text)
@@ -295,6 +409,7 @@ class InstallationScreen:
             self.progress_panel.configure(height=180 + extra_height)
             self.resize_shell()
             self.root.update_idletasks()
+            self.root.after_idle(self._scroll_to_progress)
 
     def set_stage_done(self, key: str, text: str):
         if key in self.stage_labels:

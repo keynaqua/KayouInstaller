@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import json
+import stat
 import zipfile
 from pathlib import Path
 
@@ -15,6 +16,83 @@ from utils.progress import ProgressCallback
 RESOURCEPACK_PROGRESS_START = 70
 RESOURCEPACK_PROGRESS_END = 80
 ResourcePack = Pack
+
+MOD_PACK_IDS = (
+    "mod/punchy:resourcepacks/punchy",
+    "mod/item_interactions_mod:resourcepacks/example_gui_particles",
+    "continuity:default",
+    "fabric",
+    "mod_resources",
+    "eatinganimations_compat",
+    "moonlight:merged_pack",
+)
+
+
+def _write_override_config(game_dir: Path, ordered: list[str]) -> None:
+    # Resource Pack Overrides deliberately applies ``default_packs`` in
+    # reverse (unlike options.txt).  Giving both files the same list makes a
+    # recovery/reset invert the pack stack on the next Minecraft launch.
+    defaults = list(reversed(ordered))
+    overrides = {
+        # Pack.Position uses the resource-pack screen terminology here. These
+        # packs must remain movable, but new/recovered virtual packs must be
+        # inserted at the bottom of the visible selection list.
+        identifier: {"default_position": "BOTTOM", "fixed_position": False}
+        for identifier in MOD_PACK_IDS
+    }
+    data = {
+        # v21.1.0 serializes this value as a string. Match its own output so a
+        # first launch does not treat our generated file as foreign config.
+        "schema_version": "2",
+        "failed_reloads_per_session": 5,
+        "default_packs": defaults,
+        "pack_overrides": overrides,
+    }
+    path = game_dir / "config" / "resourcepackoverrides.json"
+    if path.exists():
+        path.chmod(stat.S_IREAD | stat.S_IWRITE)
+    # The mod's documentation explicitly requires section signs in pack ids
+    # to remain JSON escaped (\\u00a7) in this file.
+    atomic_write_text(path, json.dumps(data, indent=2, ensure_ascii=True) + "\n")
+    # Protect this installer-managed file from launch-time config cleaners.
+    path.chmod(stat.S_IREAD)
+
+
+def _is_named_pack(identifier: str, fragment: str) -> bool:
+    return identifier.startswith("file/") and fragment.casefold() in identifier.casefold()
+
+
+def _arrange_packs(current: list[str], interface_pack: str) -> list[str]:
+    """Return Minecraft's low-to-high priority order.
+
+    The resource-pack screen displays this list in reverse.  Mod-provided
+    resources therefore belong immediately after vanilla, while GUI overlays
+    are inserted around Colourful Containers.
+    """
+    mod_ids = [item for item in current if not item.startswith("file/") and item != "vanilla"]
+    regular = [item for item in current if item.startswith("file/")]
+    special = [
+        item for item in regular
+        if _is_named_pack(item, "overgrown flowery gui")
+        or _is_named_pack(item, "extra flowery gui")
+        or _is_named_pack(item, "simple hotbar")
+    ]
+    regular = [item for item in regular if item not in special]
+
+    if interface_pack == "flowery":
+        below = [item for item in special if _is_named_pack(item, "overgrown flowery gui")]
+        above = [item for item in special if _is_named_pack(item, "extra flowery gui")]
+    elif interface_pack == "simple_hotbar":
+        below = [item for item in special if _is_named_pack(item, "simple hotbar")]
+        above = []
+    else:
+        below = above = []
+
+    anchor = next((index for index, item in enumerate(regular) if _is_named_pack(item, "colourful containers")), len(regular))
+    regular[anchor:anchor] = below
+    anchor += len(below) + (1 if anchor < len(regular) else 0)
+    regular[anchor:anchor] = above
+    return ["vanilla", *dict.fromkeys(mod_ids), *regular]
 
 
 def load_resourcepack_manifest(manifest_url: str, cache_version: str = "") -> list[ResourcePack]:
@@ -45,8 +123,8 @@ def _parse(value: str) -> list[str]:
 def _supports_format(value: object, expected: int) -> bool:
     if isinstance(value, int) and not isinstance(value, bool):
         return value == expected
-    if isinstance(value, list) and len(value) == 2 and all(isinstance(item, int) for item in value):
-        return min(value) <= expected <= max(value)
+    if isinstance(value, list) and value and all(isinstance(item, int) for item in value):
+        return expected in value or len(value) == 2 and min(value) <= expected <= max(value)
     if isinstance(value, dict):
         minimum = value.get("min_inclusive", value.get("min", expected))
         maximum = value.get("max_inclusive", value.get("max", expected))
@@ -71,12 +149,25 @@ def activate_resourcepacks(
     packs: list[ResourcePack],
     enabled: bool = True,
     expected_format: int = 34,
+    activation_ids: tuple[str, ...] = (),
+    interface_pack: str = "flowery",
+    profile_packs: tuple[str, ...] = (),
 ) -> None:
     path = game_dir / "options.txt"
     lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
-    managed = {_quote(pack.file_name) for pack in packs}
-    selected = [pack for pack in packs if enabled and pack.active and (game_dir / RESOURCEPACKS_DIR_NAME / pack.file_name).is_file()]
+    activation_ids = tuple(dict.fromkeys((*activation_ids, *MOD_PACK_IDS)))
+    managed = {_quote(pack.file_name) for pack in packs} | set(activation_ids)
+    selected_names = set(profile_packs)
+    selected = [pack for pack in packs if enabled and (pack.active or pack.file_name in selected_names) and (game_dir / RESOURCEPACKS_DIR_NAME / pack.file_name).is_file()]
+    if enabled and not profile_packs:
+        for pack in packs:
+            name = pack.file_name.casefold()
+            chosen = interface_pack == "flowery" and "flowery gui" in name or interface_pack == "simple_hotbar" and "simple hotbar" in name
+            if chosen and (game_dir / RESOURCEPACKS_DIR_NAME / pack.file_name).is_file() and pack not in selected:
+                selected.append(pack)
     wanted = [_quote(pack.file_name) for pack in selected]
+    if enabled:
+        wanted.extend(identifier for identifier in activation_ids if identifier not in wanted)
     incompatible = [
         _quote(pack.file_name)
         for pack in selected
@@ -92,6 +183,9 @@ def activate_resourcepacks(
         current = _parse(value)
         additions = wanted if key == "resourcePacks" else incompatible
         merged = [item for item in current if item not in managed] + additions
+        if key == "resourcePacks" and enabled:
+            merged = _arrange_packs(merged, interface_pack)
+            _write_override_config(game_dir, merged)
         output.append(f"{key}:{json.dumps(merged, ensure_ascii=False)}")
         found.add(key)
     for key in ("resourcePacks", "incompatibleResourcePacks"):

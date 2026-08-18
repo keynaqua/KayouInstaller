@@ -24,6 +24,7 @@ from minecraft.worlds import create_world
 from modpack import ModpackInfo
 from mods import load_mod_manifest, update_mods
 from neoforge import ensure_neoforge_installed
+from profiles import load_profile_manifest
 from shaders import activate_shader, ensure_shaders_installed, load_shaderpack_manifest
 from resourcepacks import activate_resourcepacks, load_resourcepack_manifest, update_resourcepacks
 
@@ -50,6 +51,7 @@ class InstallationPipeline:
         self.shaderpack_manifest = None
         self.config_manifest = None
         self.datapack_manifest = None
+        self.profile_manifest = None
         self.counts = {}
         self.skipped_stages = {}
         self.progress_ranges = {
@@ -112,6 +114,7 @@ class InstallationPipeline:
         self.shaderpack_manifest = load_shaderpack_manifest(self.info.manifest_url("shaderpacks"), cache_version)
         self.datapack_manifest = load_datapack_manifest(self.info.manifest_url("datapacks"), cache_version)
         self.config_manifest = load_config_manifest(self.info.manifest_url("configs", required=False), cache_version)
+        self.profile_manifest = load_profile_manifest(self.info.manifest_url("profiles", required=False), cache_version)
         self._build_progress_ranges()
 
     def _build_progress_ranges(self) -> None:
@@ -243,24 +246,39 @@ class InstallationPipeline:
             CONFIG_DIR_NAME,
             download_callback=download,
             manifest=self.config_manifest,
+            profile=str(self.options.get("visual_profile", self.options.get("interface_pack", "flowery"))),
         )
         self._inventory().sync("configs", result.files, remove_stale=False)
         self._inventory().sync("managed_configs", result.managed)
-        expected = len(self.config_manifest.files) if self.config_manifest else len(result.files)
+        profile = str(self.options.get("visual_profile", self.options.get("interface_pack", "flowery")))
+        if self.config_manifest:
+            matching = [item for item in self.config_manifest.files if not item.profile or item.profile == profile]
+            specific = {item.path for item in matching if item.profile == profile and profile}
+            expected = sum(1 for item in matching if item.profile or item.path not in specific)
+        else:
+            expected = len(result.files)
         self.counts["configs"] = (len(result.files), expected, "Configs")
 
     def _activate(self) -> None:
+        requested = str(self.options.get("visual_profile", self.options.get("interface_pack", "")))
+        profile = self.profile_manifest.get(requested) if self.profile_manifest else None
+        if profile is None and self.profile_manifest and self.profile_manifest.profiles:
+            profile = self.profile_manifest.get(self.profile_manifest.default)
         activate_resourcepacks(
             self._path(),
             self.resourcepack_manifest or [],
             self.options.get("activate_resourcepacks", True) is True,
             34 if self.info.minecraft_version in {"1.21", "1.21.1"} else 15 if self.info.minecraft_version == "1.20.1" else 34,
+            self.info.resourcepack_activation_ids,
+            requested or "flowery",
+            profile.resourcepacks if profile else (),
         )
         if self.shaderpack_manifest:
             activate_shader(
                 self._path(),
                 self.shaderpack_manifest,
                 self.options.get("activate_shader", True) is True,
+                profile.shader if profile else "",
             )
 
     def _record(self, category: str, directory: str, files: list[str]) -> None:

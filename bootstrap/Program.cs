@@ -1,13 +1,14 @@
 using System;
+using System.Collections;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
+using System.Security.Cryptography;
 using System.Windows.Forms;
 
 internal static class Program
 {
     private const string PayloadResource = "KayouInstaller.Payload";
-    private const string PayloadVersion = "4.0.0-bootstrap-3";
 
     [STAThread]
     private static void Main()
@@ -22,16 +23,8 @@ internal static class Program
             Directory.CreateDirectory(runtimeDirectory);
 
             string payload = Path.Combine(runtimeDirectory, "KayouInstaller.exe");
-            string marker = Path.Combine(runtimeDirectory, "bootstrap-version.txt");
-            bool installPayload = !File.Exists(payload)
-                || !File.Exists(marker)
-                || File.ReadAllText(marker).Trim() != PayloadVersion;
-
-            if (installPayload)
-            {
+            if (!PayloadMatches(payload))
                 ExtractPayload(payload);
-                File.WriteAllText(marker, PayloadVersion);
-            }
 
             // A PyInstaller executable must be treated as a fresh application,
             // never as a worker belonging to the updater that started us.
@@ -57,6 +50,23 @@ internal static class Program
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error
             );
+        }
+    }
+
+    private static bool PayloadMatches(string destination)
+    {
+        if (!File.Exists(destination))
+            return false;
+
+        using (var algorithm = SHA256.Create())
+        using (Stream embedded = Assembly.GetExecutingAssembly().GetManifestResourceStream(PayloadResource))
+        using (var installed = new FileStream(destination, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            if (embedded == null)
+                return false;
+            byte[] expected = algorithm.ComputeHash(embedded);
+            byte[] actual = algorithm.ComputeHash(installed);
+            return StructuralComparisons.StructuralEqualityComparer.Equals(expected, actual);
         }
     }
 

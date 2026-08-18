@@ -14,6 +14,7 @@ class ModpackInfo:
     java_version: int = JAVA_MAJOR
     logo_url: str = ""
     manifest_urls: dict[str, str] | None = None
+    resourcepack_activation_ids: tuple[str, ...] = ()
 
     def manifest_url(self, name: str, required: bool = True) -> str:
         url = (self.manifest_urls or {}).get(name, "")
@@ -33,4 +34,5 @@ def modpack_info_from_catalog(pack: CatalogEntry) -> ModpackInfo:
         java_version=pack.java_version,
         logo_url=pack.logo,
         manifest_urls=pack.manifests or {},
+        resourcepack_activation_ids=pack.resourcepack_activation_ids,
     )

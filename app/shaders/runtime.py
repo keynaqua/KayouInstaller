@@ -41,13 +41,28 @@ def load_shaderpack_manifest(manifest_url: str, cache_version: str = "") -> list
     )
 
 
-def activate_shader(game_dir: Path, packs: list[ShaderPack], enabled: bool = True) -> None:
+def activate_shader(game_dir: Path, packs: list[ShaderPack], enabled: bool = True, preferred: str = "") -> None:
     path = game_dir / "config" / "iris.properties"
     lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
     active = next(
         (pack.file_name for pack in packs if enabled and pack.active and (game_dir / SHADERPACKS_DIR_NAME / pack.file_name).is_file()),
         "",
     )
+    if enabled and preferred:
+        active = preferred
+    if active:
+        base = active.removesuffix(".zip")
+        generated = next(
+            (
+                pack.file_name.removesuffix(".txt")
+                for pack in packs
+                if pack.file_name.endswith(".txt")
+                and pack.file_name.startswith(f"{base} + EuphoriaPatches_")
+            ),
+            "",
+        )
+        if generated:
+            active = generated
     values = {"enableShaders": str(bool(active)).lower(), "shaderPack": active}
     output = []
     found = set()

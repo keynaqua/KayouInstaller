@@ -9,6 +9,7 @@ from catalog import CatalogEntry, load_catalog
 from config import APP_TITLE, PALETTE, set_color_theme
 from inventory import classically_uninstalled_modpacks, installed_modpacks, installed_revisions, installed_sizes
 from preferences import load_preferences, save_preferences
+from profiles import load_profile_manifest
 from utils.resources import resource_path
 from utils.http import get_bytes
 from utils.launcher import launch_minecraft_launcher
@@ -65,6 +66,8 @@ class InstallerGui:
         self.logos = {}
         self.detail_logos = {}
         self.loader_logos = {}
+        self.profile_manifests = {}
+        self.profile_logo_data = {}
         self.install_options = load_preferences()
         dark_theme = self.install_options.get("_dark_theme", True)
         set_color_theme(dark_theme)
@@ -125,6 +128,8 @@ class InstallerGui:
         try:
             packs = load_catalog()
             images = {}
+            profiles = {}
+            profile_images = {}
             for pack in packs:
                 if not pack.logo:
                     continue
@@ -132,15 +137,26 @@ class InstallerGui:
                     images[pack.id] = get_bytes(pack.logo)
                 except Exception:
                     pass
-            self._bootstrap = packs, images, None
+                try:
+                    manifest = load_profile_manifest((pack.manifests or {}).get("profiles", ""), pack.revision)
+                    if manifest.profiles:
+                        profiles[pack.id] = manifest
+                    for profile in manifest.profiles:
+                        if profile.logo:
+                            profile_images[(pack.id, profile.id)] = get_bytes(profile.logo)
+                except Exception:
+                    pass
+            self._bootstrap = packs, images, profiles, profile_images, None
         except Exception as exc:
-            self._bootstrap = [], {}, exc
+            self._bootstrap = [], {}, {}, {}, exc
 
     def _poll_bootstrap(self):
         if self._bootstrap is None or time.monotonic() - self._splash_started < 1.2:
             self.root.after(50, self._poll_bootstrap)
             return
-        packs, images, error = self._bootstrap
+        packs, images, profiles, profile_images, error = self._bootstrap
+        self.profile_manifests = profiles
+        self.profile_logo_data = profile_images
         installed = installed_modpacks()
         revisions = installed_revisions()
         sizes = installed_sizes()
@@ -261,10 +277,12 @@ class InstallerGui:
 
         self.current_view = lambda: self.show_install_details(modpack)
         self.clear()
+        profile_manifest = self.profile_manifests.get(modpack.id)
         defaults = {
             "safe_mode": False,
             "activate_resourcepacks": True,
             "activate_shader": True,
+            "visual_profile": profile_manifest.default if profile_manifest and profile_manifest.default else "flowery",
             "datapack_world": "",
             "ram_gb": get_recommended_ram_gb(modpack.recommended_ram_ratio),
         }
@@ -283,6 +301,9 @@ class InstallerGui:
             on_open_launcher=self.open_launcher,
             on_back=self.show_home,
             on_success=lambda: self.mark_updated(modpack.id, self.install_screen.final_size_mb),
+            on_options_changed=self.save_install_settings,
+            profiles=self.profile_manifests.get(modpack.id),
+            profile_logos={profile_id: data for (pack_id, profile_id), data in self.profile_logo_data.items() if pack_id == modpack.id},
         )
         self.install_screen.render()
         self._show_theme_control(on_surface=True)
