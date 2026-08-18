@@ -7,7 +7,7 @@ using System.Windows.Forms;
 internal static class Program
 {
     private const string PayloadResource = "KayouInstaller.Payload";
-    private const string PayloadVersion = "4.0.1-bootstrap-2";
+    private const string PayloadVersion = "4.0.0-bootstrap-3";
 
     [STAThread]
     private static void Main()

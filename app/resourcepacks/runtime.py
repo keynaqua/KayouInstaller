@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import json
+import zipfile
 from pathlib import Path
 
 from config import RESOURCEPACKS_DIR_NAME, SHORT_HTTP_RETRIES, SHORT_HTTP_TIMEOUT
@@ -41,11 +42,46 @@ def _parse(value: str) -> list[str]:
     return [item for item in parsed if isinstance(item, str)] if isinstance(parsed, list) else []
 
 
-def activate_resourcepacks(game_dir: Path, packs: list[ResourcePack], enabled: bool = True) -> None:
+def _supports_format(value: object, expected: int) -> bool:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value == expected
+    if isinstance(value, list) and len(value) == 2 and all(isinstance(item, int) for item in value):
+        return min(value) <= expected <= max(value)
+    if isinstance(value, dict):
+        minimum = value.get("min_inclusive", value.get("min", expected))
+        maximum = value.get("max_inclusive", value.get("max", expected))
+        return isinstance(minimum, int) and isinstance(maximum, int) and minimum <= expected <= maximum
+    return False
+
+
+def _compatible(path: Path, expected_format: int) -> bool:
+    try:
+        with zipfile.ZipFile(path) as archive:
+            data = json.loads(archive.read("pack.mcmeta").decode("utf-8-sig"))
+        metadata = data.get("pack", {}) if isinstance(data, dict) else {}
+        supported = metadata.get("supported_formats")
+        value = supported if supported is not None else metadata.get("pack_format")
+        return _supports_format(value, expected_format)
+    except (OSError, KeyError, ValueError, zipfile.BadZipFile, UnicodeDecodeError):
+        return False
+
+
+def activate_resourcepacks(
+    game_dir: Path,
+    packs: list[ResourcePack],
+    enabled: bool = True,
+    expected_format: int = 34,
+) -> None:
     path = game_dir / "options.txt"
     lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
     managed = {_quote(pack.file_name) for pack in packs}
-    wanted = [_quote(pack.file_name) for pack in packs if enabled and pack.active and (game_dir / RESOURCEPACKS_DIR_NAME / pack.file_name).is_file()]
+    selected = [pack for pack in packs if enabled and pack.active and (game_dir / RESOURCEPACKS_DIR_NAME / pack.file_name).is_file()]
+    wanted = [_quote(pack.file_name) for pack in selected]
+    incompatible = [
+        _quote(pack.file_name)
+        for pack in selected
+        if not _compatible(game_dir / RESOURCEPACKS_DIR_NAME / pack.file_name, expected_format)
+    ]
     output = []
     found = set()
     for line in lines:
@@ -54,12 +90,14 @@ def activate_resourcepacks(game_dir: Path, packs: list[ResourcePack], enabled: b
             output.append(line)
             continue
         current = _parse(value)
-        merged = [item for item in current if item not in managed] + wanted
+        additions = wanted if key == "resourcePacks" else incompatible
+        merged = [item for item in current if item not in managed] + additions
         output.append(f"{key}:{json.dumps(merged, ensure_ascii=False)}")
         found.add(key)
     for key in ("resourcePacks", "incompatibleResourcePacks"):
         if key not in found:
-            output.append(f"{key}:{json.dumps(wanted, ensure_ascii=False)}")
+            additions = wanted if key == "resourcePacks" else incompatible
+            output.append(f"{key}:{json.dumps(additions, ensure_ascii=False)}")
     atomic_write_text(path, "\n".join(output) + "\n")
 
 

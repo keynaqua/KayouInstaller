@@ -254,6 +254,7 @@ class InstallationPipeline:
             self._path(),
             self.resourcepack_manifest or [],
             self.options.get("activate_resourcepacks", True) is True,
+            34 if self.info.minecraft_version in {"1.21", "1.21.1"} else 15 if self.info.minecraft_version == "1.20.1" else 34,
         )
         if self.shaderpack_manifest:
             activate_shader(
