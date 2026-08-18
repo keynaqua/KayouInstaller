@@ -1,5 +1,5 @@
-from config import APP_TITLE, GUI_MODPACK_NAMES, PALETTE
+from config import APP_TITLE, PALETTE
 
 from .state import log_queue
 
-__all__ = ["APP_TITLE", "GUI_MODPACK_NAMES", "PALETTE", "log_queue"]
+__all__ = ["APP_TITLE", "PALETTE", "log_queue"]

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tomllib
 import zipfile
 from dataclasses import dataclass, field
+from email.parser import BytesParser
 from pathlib import Path
 from typing import Any
 
@@ -86,16 +88,63 @@ def _load_json_tolerant(text: str) -> dict[str, Any] | list[Any]:
     return json.loads(_escape_control_chars(text))
 
 
-def _read_fabric_meta(path: Path) -> dict[str, Any]:
-    with zipfile.ZipFile(path) as jar:
-        with jar.open("fabric.mod.json") as file:
-            data = _load_json_tolerant(file.read().decode("utf-8-sig", errors="replace"))
-
+def _fabric_mods(jar: zipfile.ZipFile) -> list[tuple[str, str]]:
+    with jar.open("fabric.mod.json") as file:
+        data = _load_json_tolerant(file.read().decode("utf-8-sig", errors="replace"))
     if isinstance(data, list):
-        data = next((item for item in data if isinstance(item, dict) and item.get("id")), {})
-    if not isinstance(data, dict):
-        raise RuntimeError("fabric.mod.json inexploitable")
-    return data
+        entries = [item for item in data if isinstance(item, dict)]
+    else:
+        entries = [data] if isinstance(data, dict) else []
+    return [_metadata(entry, "fabric.mod.json") for entry in entries]
+
+
+def _manifest_version(jar: zipfile.ZipFile) -> str | None:
+    try:
+        with jar.open("META-INF/MANIFEST.MF") as file:
+            return BytesParser().parsebytes(file.read()).get("Implementation-Version")
+    except KeyError:
+        return None
+
+
+def _neoforge_mods(jar: zipfile.ZipFile, metadata_path: str) -> list[tuple[str, str]]:
+    with jar.open(metadata_path) as file:
+        data = tomllib.loads(file.read().decode("utf-8-sig", errors="replace"))
+    entries = data.get("mods", [])
+    if not isinstance(entries, list):
+        raise RuntimeError(f"{metadata_path} inexploitable")
+    jar_version = _manifest_version(jar)
+    mods = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        mod_id, version = _metadata(entry, metadata_path, "modId")
+        if version == "${file.jarVersion}":
+            if not jar_version:
+                raise RuntimeError(f"Implementation-Version manquante pour {mod_id}")
+            version = jar_version
+        mods.append((mod_id, version))
+    return mods
+
+
+def _metadata(data: dict[str, Any], source: str, id_field: str = "id") -> tuple[str, str]:
+    mod_id = data.get(id_field)
+    version = data.get("version", "1")
+    if not isinstance(mod_id, str) or not mod_id.strip():
+        raise RuntimeError(f"id manquant dans {source}")
+    if not isinstance(version, str) or not version.strip():
+        raise RuntimeError(f"version manquante dans {source}")
+    return mod_id.strip(), version.strip()
+
+
+def _read_mods(path: Path) -> list[tuple[str, str]]:
+    with zipfile.ZipFile(path) as jar:
+        names = set(jar.namelist())
+        if "fabric.mod.json" in names:
+            return _fabric_mods(jar)
+        for metadata_path in ("META-INF/neoforge.mods.toml", "META-INF/mods.toml"):
+            if metadata_path in names:
+                return _neoforge_mods(jar, metadata_path)
+    raise RuntimeError("metadata Fabric ou NeoForge introuvable")
 
 
 def detect_mods(mods_dir: str | Path) -> DetectionReport:
@@ -109,20 +158,14 @@ def detect_mods(mods_dir: str | Path) -> DetectionReport:
 
     for jar_path in sorted(mods_path.glob(JAR_GLOB)):
         try:
-            meta = _read_fabric_meta(jar_path)
-            mod_id = meta.get("id")
-            version = meta.get("version")
-            if not isinstance(mod_id, str) or not mod_id.strip():
-                raise RuntimeError("id manquant")
-            if not isinstance(version, str) or not version.strip():
-                raise RuntimeError("version manquante")
-            report.mods.append(
-                InstalledMod(
-                    mod_id=mod_id.strip(),
-                    version=version.strip(),
-                    file_path=jar_path,
+            for mod_id, version in _read_mods(jar_path):
+                report.mods.append(
+                    InstalledMod(
+                        mod_id=mod_id,
+                        version=version,
+                        file_path=jar_path,
+                    )
                 )
-            )
         except Exception as exc:
             report.broken_files.append((jar_path, str(exc)))
 

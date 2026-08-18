@@ -15,6 +15,7 @@ from config import (
 )
 from logger import fabric, success
 from utils.http import download_file, get_json
+from utils.files import FileProgressCallback, bind_progress
 
 
 def _parse_version_tuple(version: str) -> tuple[int, ...]:
@@ -90,10 +91,16 @@ def get_latest_installer_version() -> str:
     return data[0]["version"]
 
 
-def run_fabric_installer(jar_path: Path, mc_dir: Path, mc_version: str, loader_version: str) -> None:
+def run_fabric_installer(
+    jar_path: Path,
+    mc_dir: Path,
+    mc_version: str,
+    loader_version: str,
+    java_command: str = JAVA_COMMAND,
+) -> None:
     result = subprocess.run(
         [
-            JAVA_COMMAND,
+            java_command,
             "-jar",
             str(jar_path),
             "client",
@@ -132,7 +139,12 @@ def resolve_loader_version(mc_version: str, requested_version: str) -> str:
     return requested_version
 
 
-def ensure_fabric_installed(mc_version: str, requested_version: str = LATEST_VERSION) -> str:
+def ensure_fabric_installed(
+    mc_version: str,
+    requested_version: str = LATEST_VERSION,
+    download_callback: FileProgressCallback | None = None,
+    java_command: str = JAVA_COMMAND,
+) -> str:
     mc_dir = get_minecraft_dir()
 
     fabric(f"Dossier Minecraft : {mc_dir}")
@@ -153,9 +165,13 @@ def ensure_fabric_installed(mc_version: str, requested_version: str = LATEST_VER
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         jar_path = Path(tmp_dir) / get_fabric_installer_name(installer_version)
-        download_file(get_fabric_installer_url(installer_version), jar_path)
+        download_file(
+            get_fabric_installer_url(installer_version),
+            jar_path,
+            callback=bind_progress(jar_path.name, download_callback),
+        )
         fabric(f"Lancement de l'installateur Fabric {installer_version}...")
-        run_fabric_installer(jar_path, mc_dir, mc_version, expected_loader)
+        run_fabric_installer(jar_path, mc_dir, mc_version, expected_loader, java_command)
 
     installed_loader = find_installed_fabric_loader(mc_dir, mc_version)
     fabric_versions = _list_installed_fabric_versions(mc_dir, mc_version)

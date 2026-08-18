@@ -4,6 +4,31 @@ def progress(value: int):
     if log_queue:
         log_queue.put(("progress", value))
 
+
+def stage(key: str, message: str):
+    if log_queue:
+        log_queue.put(("stage", key, message))
+
+
+def stage_done(key: str, message: str):
+    if log_queue:
+        log_queue.put(("stage_done", key, message))
+
+
+def stage_skipped(key: str, message: str):
+    if log_queue:
+        log_queue.put(("stage_skipped", key, message))
+
+
+def download(name: str, received: int, total: int | None, speed: float):
+    if log_queue:
+        log_queue.put(("download", name, received, total, speed))
+
+
+def total_size(value: int):
+    if log_queue:
+        log_queue.put(("size_total", value))
+
 def _send(msg: str, tag: str = "default"):
     if log_queue:
         log_queue.put(("log", msg, tag))
@@ -28,25 +53,15 @@ def step(message: str) -> None:
     text = f" {message} "
     line = text.center(width, "─")
 
-    if log_queue:
-        # log_queue.put(("clear", ""))  # ❌ désactivé pour l’instant
-
-        pass
-
     _send(line, "magenta")
-
-
-# ----- Fabric ----- #
 def fabric(message: str) -> None:
     _send(f"[⛩️] {message}", "yellow")
 
 
-# ----- NeoForge ----- #
 def neoforge(message: str) -> None:
     _send(f"[NEOFORGE] {message}", "yellow")
 
 
-# ----- Mods ----- #
 def mods(message: str) -> None:
     _send(f"[🧬] {message}", "yellow")
 
@@ -67,11 +82,9 @@ def extra(message: str) -> None:
     _send(f"  • 🔅 {message}", "cyan")
 
 
-# ----- Resourcepacks ----- #
 def txtp(message: str) -> None:
     _send(f"[🗻] {message}", "yellow")
 
 
-# ----- Shaderpacks ----- #
 def shader(message: str) -> None:
     _send(f"[🌌] {message}", "yellow")

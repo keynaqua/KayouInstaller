@@ -3,27 +3,10 @@ import sys
 from pathlib import Path
 
 import logger
-from config import (
-    CONFIG_DIR_NAME,
-    LAUNCHER_FABRIC,
-    LAUNCHER_NEOFORGE,
-    MODPACK_DATA_OWNER,
-    MODPACK_DATA_REPO,
-    MODS_DIR_NAME,
-    get_installation_dir,
-    modpack_key,
-)
-from config_sync import sync_config_folder
-from fabric import ensure_fabric_installed
 from gui import log_queue, show_error_dialog, start_gui
-from java import ensure_java_installed
-from logger import error, progress, step
-from minecraft import create_minecraft_profile
-from modpack import ModpackInfo, load_modpack_info
-from mods import update_mods
-from neoforge import ensure_neoforge_installed
-from shaders import ensure_shaders_installed
-from txt_packs import update_txt_packs
+from logger import error
+from modpack import ModpackInfo, modpack_info_from_catalog
+from pipeline import InstallationPipeline
 from uninstall import uninstall_modpack
 from utils.updater import check_for_updates, cleanup_other_versions, handle_cleanup_args
 
@@ -63,74 +46,16 @@ def relaunch_as_admin() -> bool:
     return False
 
 
-def ensure_launcher_installed(info: ModpackInfo) -> str:
-    if info.launcher == LAUNCHER_FABRIC:
-        return ensure_fabric_installed(info.minecraft_version, info.launcher_version)
-    if info.launcher == LAUNCHER_NEOFORGE:
-        return ensure_neoforge_installed(info.minecraft_version, info.launcher_version)
-    raise InstallerError(f"Lanceur inconnu: {info.launcher}")
+def run(info: ModpackInfo, options: dict):
+    InstallationPipeline(info, options).run()
 
 
-def run(info: ModpackInfo, safe_mode: bool):
-    progress(10)
-    step("Verification de Java...")
-    ensure_java_installed()
-
-    progress(20)
-    step(f"Verification du lanceur {info.launcher}...")
-    version_id = ensure_launcher_installed(info)
-
-    progress(30)
-    step("Preparation de l'installation Minecraft...")
-    is_fresh_install = not get_installation_dir(info.installation_dir).exists()
-    minecraft_dir = create_minecraft_profile(info.name, info.installation_dir, version_id)
-
-    progress(30)
-    step("Synchronisation des mods...")
-    update_mods(
-        Path(minecraft_dir) / MODS_DIR_NAME,
-        info.key,
-        safe_mode=safe_mode,
-        progress_callback=progress,
-    )
-
-    progress(70)
-    step("Synchronisation des packs de ressource...")
-    update_txt_packs(minecraft_dir, info.key, progress_callback=progress)
-
-    progress(80)
-    step("Verification des shaders...")
-    ensure_shaders_installed(minecraft_dir, info.key, progress_callback=progress)
-
-    progress(90)
-    step("Synchronisation des configs necessaires... (BETA)")
-    if is_fresh_install:
-        sync_config_folder(
-            MODPACK_DATA_OWNER,
-            MODPACK_DATA_REPO,
-            info.key,
-            info.installation_dir,
-            CONFIG_DIR_NAME,
-        )
-    else:
-        step("Installation deja presente, config de base conservee.")
-
-    progress(100)
-    step("Installation terminee !")
-
-
-def run_modpack(modpack_name: str, safe_mode: bool = False):
-    key = modpack_key(modpack_name)
-    try:
-        info = load_modpack_info(key)
-    except Exception as exc:
-        raise InstallerError(
-            f"Le manifest modpack.json de '{modpack_name}' est introuvable ou invalide: {exc}"
-        ) from exc
+def run_modpack(modpack, options: dict | None = None):
+    info = modpack_info_from_catalog(modpack)
     if not info.launcher:
-        raise InstallerError(f"Le modpack '{modpack_name}' n'a pas de lanceur configure.")
+        raise InstallerError(f"Le modpack '{info.name}' n'a pas de lanceur configure.")
 
-    run(info, safe_mode)
+    run(info, options or {})
 
 
 def main():

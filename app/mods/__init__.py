@@ -1,3 +1,3 @@
-from .runtime import update_mods
+from .runtime import load_mod_manifest, update_mods
 
-__all__ = ["update_mods"]
+__all__ = ["load_mod_manifest", "update_mods"]

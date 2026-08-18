@@ -3,5 +3,6 @@ __pycache__/
 build/
 dist/
 *.spec
+!KayouInstaller.spec
 *.part
 update_tmp.bat

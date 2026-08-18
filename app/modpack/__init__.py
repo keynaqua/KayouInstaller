@@ -1,3 +1,3 @@
-from .runtime import ModpackInfo, load_modpack_info
+from .runtime import ModpackInfo, modpack_info_from_catalog
 
-__all__ = ["ModpackInfo", "load_modpack_info"]
+__all__ = ["ModpackInfo", "modpack_info_from_catalog"]

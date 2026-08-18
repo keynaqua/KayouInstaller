@@ -5,11 +5,12 @@ from pathlib import Path
 
 from config import (
     APP_BASENAME,
+    CATALOG_CACHE_TTL,
     UPDATE_HTTP_RETRIES,
     UPDATE_HTTP_TIMEOUT,
     UPDATE_SCRIPT_NAME,
     VERSION,
-    github_release_api,
+    get_modpack_catalog_url,
     pending_update_name,
     release_exe_name,
 )
@@ -55,39 +56,25 @@ def updater_script_path() -> Path:
 
 
 def get_latest_release_info() -> dict:
-    data = get_json(github_release_api(), timeout=UPDATE_HTTP_TIMEOUT, retries=UPDATE_HTTP_RETRIES)
+    data = get_json(
+        get_modpack_catalog_url(),
+        timeout=UPDATE_HTTP_TIMEOUT,
+        retries=UPDATE_HTTP_RETRIES,
+        cache_ttl=CATALOG_CACHE_TTL,
+    )
 
     if not isinstance(data, dict):
-        raise RuntimeError("Reponse GitHub invalide.")
+        raise RuntimeError("Catalogue Cloudflare invalide.")
 
-    tag_name = str(data.get("tag_name", "")).strip()
-    if not tag_name:
-        raise RuntimeError("tag_name absent de la release.")
-
-    expected_name = release_exe_name()
-    assets = data.get("assets", [])
-
-    if not isinstance(assets, list):
-        raise RuntimeError("Liste assets invalide.")
-
-    for asset in assets:
-        if not isinstance(asset, dict):
-            continue
-        if asset.get("name") == expected_name:
-            download_url = asset.get("browser_download_url")
-            if not isinstance(download_url, str) or not download_url.strip():
-                raise RuntimeError(f"download_url manquant pour '{expected_name}'")
-
-            return {
-                "version": tag_name.lstrip("vV"),
-                "asset_name": expected_name,
-                "download_url": download_url,
-            }
-
-    available = [asset.get("name", "?") for asset in assets if isinstance(asset, dict)]
-    raise RuntimeError(
-        f"Asset '{expected_name}' introuvable. Assets disponibles: {available}"
-    )
+    release = data.get("installer")
+    if not isinstance(release, dict):
+        raise RuntimeError("Métadonnées de l'installeur absentes du catalogue.")
+    version = str(release.get("version", "")).strip().lstrip("vV")
+    download_url = release.get("download_url")
+    asset_name = str(release.get("asset_name", release_exe_name())).strip()
+    if not version or not isinstance(download_url, str) or not download_url.strip():
+        raise RuntimeError("Métadonnées de mise à jour incomplètes.")
+    return {"version": version, "asset_name": asset_name, "download_url": download_url.strip()}
 
 
 def handle_cleanup_args() -> None:

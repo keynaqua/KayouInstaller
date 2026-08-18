@@ -1,384 +1,398 @@
+import os
+import shutil
 import tkinter as tk
+from datetime import datetime
+from pathlib import Path
+from tkinter import filedialog
 
-from config import GUI_FONT, GUI_FONT_SEMIBOLD, GUI_MONO_FONT, PALETTE
+from config import CACHE_DIR_NAME, GUI_FONT, GUI_FONT_SEMIBOLD, INSTALLATIONS_DIR_NAME, PALETTE, get_minecraft_dir
+from gui.components import RoundedPanel, RoundedProgress, SmoothScrollbar, create_button
 from gui.core.state import log_queue
+from utils.resources import resource_path
+
+
+def _mb(value: int) -> float:
+    return value / 1024 / 1024
 
 
 class InstallationScreen:
-    def __init__(
-        self,
-        parent,
-        root,
-        state,
-        modpack_name: str,
-        on_open_launcher,
-        operation: str = "install",
-    ):
+    def __init__(self, parent, root, modpack, logo, loader_logo, options, on_start, on_settings, on_open_launcher, on_back, on_success):
         self.parent = parent
         self.root = root
-        self.state = state
-        self.modpack_name = modpack_name
+        self.modpack = modpack
+        self.logo = logo
+        self.loader_logo = loader_logo
+        self.options = options
+        self.on_start = on_start
+        self.on_settings = on_settings
         self.on_open_launcher = on_open_launcher
-        self.operation = operation
-
+        self.on_back = on_back
+        self.on_success = on_success
+        self.state = None
         self.screen = None
-        self.percent_label = None
-        self.progress_track = None
-        self.progress_fill = None
-        self.status_label = None
-        self.helper_label = None
-        self.footer_message = None
-        self.launch_button = None
-        self.log_box = None
+        self.downloads = {}
+        self.error = ""
+        self.log_path = None
+        self.log_lines = []
+        self.log_window = None
+        self.log_text = None
+        self.active_stage = None
+        self.emoji_images = {}
+        self.world_icon = None
+        self.total_size_mb = modpack.size_mb
+        self.final_size_mb = None
+
+    def _load_emoji_images(self):
+        names = ("pending", "success", "error", "skipped", "validate", "java", "loader_neoforge", "loader_fabric", "profile", "mods", "resourcepacks", "shaders", "datapacks", "configs", "activate", "enabled", "disabled")
+        for name in names:
+            try:
+                image = tk.PhotoImage(file=str(resource_path(f"assets/ui/emoji/{name}.png")))
+                self.emoji_images[name] = image if name in {"enabled", "disabled"} else image.subsample(3, 3)
+            except (OSError, tk.TclError):
+                self.emoji_images[name] = None
 
     def render(self):
+        self._load_emoji_images()
         self.screen = tk.Frame(self.parent, bg=PALETTE["bg"])
-        self.screen.grid(row=0, column=0, sticky="nsew", padx=22, pady=22)
+        self.screen.grid(row=0, column=0, sticky="nsew")
+        self.screen.grid_rowconfigure(0, weight=1)
         self.screen.grid_columnconfigure(0, weight=1)
-        self.screen.grid_rowconfigure(1, weight=1)
+        viewport = tk.Canvas(self.screen, bg=PALETTE["bg"], bd=0, highlightthickness=0)
+        scrollbar = SmoothScrollbar(self.screen, viewport.yview)
+        viewport.configure(yscrollcommand=scrollbar.set)
+        viewport.grid(row=0, column=0, sticky="nsew")
+        holder = tk.Frame(viewport, bg=PALETTE["bg"])
+        holder.grid_columnconfigure(0, weight=1)
+        holder_window = viewport.create_window(0, 0, anchor="nw", window=holder)
+        base_shell_height = 730
+        self.stage_extra_height = 0
+        shell = RoundedPanel(holder, PALETTE["surface"], radius=8, border=PALETTE["border"], height=base_shell_height)
+        self.shell = shell
+        shell.grid(row=0, column=0, sticky="ew", padx=24, pady=24)
 
-        self._render_header()
-        self._render_content()
-        self._render_footer()
-        self._bind_resize()
+        def resize_shell(viewport_height=None):
+            available = (viewport_height if viewport_height is not None else viewport.winfo_height()) - 48
+            shell.configure(height=max(base_shell_height + self.stage_extra_height, available))
 
-    def _render_header(self):
-        header = tk.Frame(
-            self.screen,
-            bg=PALETTE["surface"],
-            highlightbackground=PALETTE["border"],
-            highlightthickness=1,
-        )
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 14))
-        header.grid_columnconfigure(0, weight=1)
+        self.resize_shell = resize_shell
 
-        tk.Label(
-            header,
-            text="INSTALLATEUR MINECRAFT" if self.operation == "install" else "DESINSTALLATEUR MINECRAFT",
-            bg=PALETTE["surface"],
-            fg=PALETTE["muted"],
-            font=(GUI_FONT_SEMIBOLD, 9),
-        ).grid(row=0, column=0, sticky="w", padx=18, pady=(16, 2))
+        def update_scrollbar():
+            viewport.configure(scrollregion=viewport.bbox("all"))
+            if holder.winfo_reqheight() > viewport.winfo_height():
+                scrollbar.grid(row=0, column=1, sticky="ns")
+            else:
+                scrollbar.grid_remove()
+                viewport.yview_moveto(0)
 
-        tk.Label(
-            header,
-            text=f"Installation de {self.modpack_name}"
-            if self.operation == "install"
-            else f"Desinstallation de {self.modpack_name}",
-            bg=PALETTE["surface"],
-            fg=PALETTE["text"],
-            font=(GUI_FONT_SEMIBOLD, 22),
-        ).grid(row=1, column=0, sticky="w", padx=18)
+        holder.bind("<Configure>", lambda _event: viewport.after_idle(update_scrollbar))
+        viewport.bind("<Configure>", lambda event: (viewport.itemconfigure(holder_window, width=event.width), resize_shell(event.height), viewport.after_idle(update_scrollbar)))
 
-        tk.Label(
-            header,
-            text="Installation, mise a jour et validation de l'environnement de jeu."
-            if self.operation == "install"
-            else "Suppression des fichiers selectionnes pour ce modpack.",
-            bg=PALETTE["surface"],
-            fg=PALETTE["muted"],
-            font=(GUI_FONT, 10),
-        ).grid(row=2, column=0, sticky="w", padx=18, pady=(4, 14))
+        def scroll(event):
+            if viewport.winfo_exists():
+                viewport.yview_scroll(-max(1, abs(event.delta) // 120) if event.delta > 0 else max(1, abs(event.delta) // 120), "units")
 
-    def _render_content(self):
-        content = tk.Frame(self.screen, bg=PALETTE["bg"])
-        content.grid(row=1, column=0, sticky="nsew")
-        content.grid_columnconfigure(0, weight=1)
-        content.grid_rowconfigure(1, weight=1)
+        self.root.bind("<MouseWheel>", scroll)
+        card = shell.content
+        card.config(padx=34, pady=28)
+        card.grid_columnconfigure(0, weight=1)
+        header = tk.Frame(card, bg=PALETTE["surface"])
+        header.grid(row=0, column=0)
+        brand = tk.Frame(header, bg=PALETTE["surface"])
+        brand.grid(row=0, column=0)
+        if self.logo:
+            tk.Label(brand, image=self.logo, bg=PALETTE["surface"]).grid(row=0, column=0, rowspan=2, padx=(0, 24))
+        tk.Label(brand, text=self.modpack.name, bg=PALETTE["surface"], fg=PALETTE["text"], font=(GUI_FONT_SEMIBOLD, 30)).grid(row=0, column=1, sticky="sw")
+        tk.Label(brand, text=self.modpack.description, bg=PALETTE["surface"], fg=PALETTE["muted"], font=(GUI_FONT, 11), wraplength=760, justify="left").grid(row=1, column=1, sticky="nw", pady=(6, 0))
+        info_panel = RoundedPanel(card, PALETTE["surface_alt"], radius=8, border=PALETTE["border"], height=238)
+        info_panel.grid(row=1, column=0, sticky="ew", pady=(24, 18))
+        info = info_panel.content
+        info.config(padx=18, pady=12)
+        size = f"{self.total_size_mb:.1f} Mo" if self.total_size_mb is not None else "Indisponible"
+        values = (("TAILLE", size), ("LANCEUR", self.modpack.loader.title()), ("MINECRAFT", self.modpack.minecraft_version), ("ÉTAT", self.modpack.update_status))
+        for column, (label, value) in enumerate(values):
+            info.grid_columnconfigure(column, weight=1)
+            tk.Label(info, text=label, bg=PALETTE["surface_alt"], fg=PALETTE["muted"], font=(GUI_FONT_SEMIBOLD, 9)).grid(row=0, column=column)
+            value_row = tk.Frame(info, bg=PALETTE["surface_alt"])
+            value_row.grid(row=1, column=column, pady=(4, 0))
+            if label == "LANCEUR" and self.loader_logo:
+                tk.Label(value_row, image=self.loader_logo, bg=PALETTE["surface_alt"]).pack(side="left", padx=(0, 7))
+            color = self._status_color(value) if label == "ÉTAT" else PALETTE["text"]
+            value_label = tk.Label(value_row, text=value, bg=PALETTE["surface_alt"], fg=color, font=(GUI_FONT_SEMIBOLD, 11))
+            value_label.pack(side="left")
+            if label == "TAILLE":
+                self.size_value = value_label
+        tk.Frame(info, bg=PALETTE["border"], height=1).grid(row=2, column=0, columnspan=4, sticky="ew", pady=(14, 10))
+        tk.Label(info, text="Configuration", bg=PALETTE["surface_alt"], fg=PALETTE["text"], font=(GUI_FONT_SEMIBOLD, 13)).grid(row=3, column=0, columnspan=4, sticky="w", pady=(0, 8))
+        self.option_values = {}
+        options_panel = RoundedPanel(info, PALETTE["surface_alt"], radius=7, border=PALETTE["border"], height=82)
+        options_panel.grid(row=4, column=0, columnspan=4, sticky="ew")
+        options_row = options_panel.content
+        options_row.config(padx=10, pady=8)
+        option_labels = (("resourcepacks", "PACKS DE RESSOURCES"), ("shader", "SHADER"), ("datapacks", "DATAPACKS"), ("safe_mode", "SAFEMODE"))
+        for column, (key, label) in enumerate(option_labels):
+            options_row.grid_columnconfigure(column, weight=1)
+            cell = tk.Frame(options_row, bg=PALETTE["surface_alt"])
+            cell.grid(row=0, column=column, sticky="nsew")
+            cell.grid_columnconfigure(0, weight=1)
+            tk.Label(cell, text=label, bg=PALETTE["surface_alt"], fg=PALETTE["muted"], font=(GUI_FONT_SEMIBOLD, 9), anchor="center").grid(row=0, column=0, sticky="ew")
+            value = tk.Label(cell, bg=PALETTE["surface_alt"], fg=PALETTE["text"], font=(GUI_FONT, 10), anchor="center")
+            value.grid(row=1, column=0, sticky="ew", pady=(5, 0))
+            self.option_values[key] = value
+        progress_panel = RoundedPanel(card, PALETTE["surface_alt"], radius=8, border=PALETTE["border"], height=180)
+        self.progress_panel = progress_panel
+        progress_panel.grid(row=2, column=0, sticky="ew")
+        progress = progress_panel.content
+        progress.config(padx=24, pady=20)
+        progress.grid_columnconfigure(0, weight=1)
+        tk.Label(progress, text="Progression", bg=PALETTE["surface_alt"], fg=PALETTE["text"], font=(GUI_FONT_SEMIBOLD, 15)).grid(row=0, column=0, sticky="w")
+        self.status = tk.Label(progress, text="Prêt à installer", bg=PALETTE["surface_alt"], fg=PALETTE["text"], font=(GUI_FONT_SEMIBOLD, 12), anchor="w")
+        checklist = tk.Frame(progress, bg=PALETTE["surface_alt"])
+        checklist.grid(row=1, column=0, sticky="ew", pady=(10, 8))
+        checklist.grid_columnconfigure(0, weight=1)
+        self.checklist = checklist
+        self.stage_labels = {}
+        self.stage_state_icons = {}
+        self.stage_texts = {}
+        self.stage_row = 0
+        self.stage_names = {
+            "validate": "Validation des manifests", "java": "Vérification de Java",
+            "loader": f"Vérification de {self.modpack.loader.title()}",
+            "profile": "Préparation du profil Minecraft", "mods": "Synchronisation des mods",
+            "resourcepacks": "Synchronisation des packs de ressources",
+            "shaders": "Synchronisation des shaders", "datapacks": "Synchronisation des datapacks",
+            "configs": "Synchronisation des configs", "activate": "Activation des packs",
+        }
+        self.current = tk.Label(progress, text="Aucun téléchargement en cours", bg=PALETTE["surface_alt"], fg=PALETTE["muted"], font=(GUI_FONT, 10), anchor="w")
+        self.progress_bar = RoundedProgress(progress, show_bytes=True, height=26)
+        self.progress_bar.grid(row=2, column=0, sticky="ew", pady=(8, 14))
+        self.progress_bar.set(0, 0, self.total_size_mb)
+        self.message = tk.Label(progress, text="Vérifie les réglages puis lance l'installation.", bg=PALETTE["surface_alt"], fg=PALETTE["muted"], font=(GUI_FONT, 10), wraplength=520, justify="left")
+        self.message.grid(row=3, column=0, sticky="w")
+        self.actions = tk.Frame(card, bg=PALETTE["surface"])
+        self.actions.grid(row=3, column=0, pady=(18, 0))
+        self.install = create_button(self.actions, "Installer", self.on_start)
+        self.settings = create_button(self.actions, "Réglages", self.on_settings, variant="secondary")
+        self.logs = create_button(self.actions, "Logs", self.open_logs, variant="secondary")
+        self.back = create_button(self.actions, "Retour", self.on_back, variant="secondary")
+        self.launch = create_button(self.actions, "Lancer Minecraft", self.on_open_launcher)
+        self.export = create_button(self.actions, "Télécharger le journal", self.export_log, variant="secondary")
+        self.install.grid(row=0, column=0, padx=6)
+        self.settings.grid(row=0, column=1, padx=6)
+        self.logs.grid(row=0, column=2, padx=6)
+        self.back.grid(row=0, column=3, padx=6)
+        self.refresh_options()
+        def initialize_scroll():
+            self.root.update_idletasks()
+            viewport.itemconfigure(holder_window, width=viewport.winfo_width())
+            viewport.configure(scrollregion=(0, 0, viewport.winfo_width(), holder.winfo_reqheight()))
+            update_scrollbar()
 
-        self._render_status(content)
-        self._render_log(content)
+        self.root.after_idle(initialize_scroll)
+        self.root.after(50, initialize_scroll)
+        self.root.after(250, initialize_scroll)
 
-    def _render_status(self, parent):
-        status_card = tk.Frame(
-            parent,
-            bg=PALETTE["surface_alt"],
-            highlightbackground=PALETTE["border"],
-            highlightthickness=1,
-            padx=16,
-            pady=14,
-        )
-        status_card.grid(row=0, column=0, sticky="ew", pady=(0, 12))
-        status_card.grid_columnconfigure(0, weight=1)
+    def refresh_options(self):
+        if not hasattr(self, "option_values"):
+            return
+        world = self.options.get("datapack_world") or "Aucun monde"
+        booleans = {
+            "safe_mode": self.options.get("safe_mode", False),
+            "resourcepacks": self.options.get("activate_resourcepacks", True),
+            "shader": self.options.get("activate_shader", True),
+        }
+        for key, value in booleans.items():
+            image = self.emoji_images["enabled" if value else "disabled"]
+            self.option_values[key].config(text="", image=image, compound="center")
 
-        status_row = tk.Frame(status_card, bg=PALETTE["surface_alt"])
-        status_row.grid(row=0, column=0, sticky="ew")
-        status_row.grid_columnconfigure(0, weight=1)
+        self.world_icon = None
+        if world != "Aucun monde":
+            installation_dir = self.modpack.installation_dir or self.modpack.id
+            icon_path = get_minecraft_dir() / INSTALLATIONS_DIR_NAME / installation_dir / "saves" / world / "icon.png"
+            if icon_path.is_file():
+                try:
+                    image = tk.PhotoImage(file=str(icon_path))
+                    factor = max(1, (max(image.width(), image.height()) + 35) // 36)
+                    self.world_icon = image.subsample(factor, factor)
+                except (OSError, tk.TclError):
+                    pass
+        self.option_values["datapacks"].config(text=world, image=self.world_icon or "", compound="left", padx=6)
 
-        self.status_label = tk.Label(
-            status_row,
-            text="Installation en cours..."
-            if self.operation == "install"
-            else "Desinstallation en cours...",
-            bg=PALETTE["surface_alt"],
-            fg=PALETTE["text"],
-            font=(GUI_FONT_SEMIBOLD, 12),
-        )
-        self.status_label.grid(row=0, column=0, sticky="w")
+    @staticmethod
+    def _status_color(status: str):
+        normalized = status.casefold()
+        if "à jour" in normalized or normalized == "installé":
+            return PALETTE["success"]
+        if "mise à jour" in normalized or "réinstallation" in normalized:
+            return PALETTE["error"]
+        if "impossible" in normalized:
+            return PALETTE["warning"]
+        return PALETTE["text"]
 
-        self.percent_label = tk.Label(
-            status_row,
-            text="0%",
-            bg=PALETTE["surface_alt"],
-            fg=PALETTE["accent"],
-            font=(GUI_FONT_SEMIBOLD, 11),
-        )
-        self.percent_label.grid(row=0, column=1, sticky="e")
+    def start(self, state):
+        self.state = state
+        self.downloads.clear()
+        self.log_lines.clear()
+        self.error = ""
+        root_path = Path(os.getenv("LOCALAPPDATA") or Path.cwd()) / CACHE_DIR_NAME / "logs"
+        root_path.mkdir(parents=True, exist_ok=True)
+        self.log_path = root_path / f"installation-{datetime.now():%Y%m%d-%H%M%S}.log"
+        for button in (self.install, self.settings, self.back):
+            button.config(state="disabled", cursor="")
+        self.status.config(text="Préparation de l'installation...", fg=PALETTE["text"])
+        self.message.config(text="Le lanceur restera fermé jusqu'à la fin.", fg=PALETTE["muted"])
 
-        self.progress_track = tk.Frame(status_card, bg=PALETTE["accent_dark"], height=12)
-        self.progress_track.grid(row=1, column=0, sticky="ew", pady=(12, 10))
-        self.progress_track.grid_propagate(False)
+    def _write(self, text: str):
+        self.log_lines.append(text)
+        if self.log_text and self.log_text.winfo_exists():
+            self.log_text.config(state="normal")
+            self.log_text.insert(tk.END, text + "\n")
+            self.log_text.config(state="disabled")
+            self.log_text.see(tk.END)
+        if self.log_path:
+            with self.log_path.open("a", encoding="utf-8") as file:
+                file.write(text + "\n")
 
-        self.progress_fill = tk.Frame(self.progress_track, bg=PALETTE["accent"], width=0, height=12)
-        self.progress_fill.place(x=0, y=0, relheight=1.0)
-
-        self.helper_label = tk.Label(
-            status_card,
-            text="Le launcher restera ferme jusqu'a la fin de l'installation."
-            if self.operation == "install"
-            else "Ne ferme pas l'application pendant la suppression des fichiers.",
-            bg=PALETTE["surface_alt"],
-            fg=PALETTE["muted"],
-            font=(GUI_FONT, 9),
-        )
-        self.helper_label.grid(row=2, column=0, sticky="w")
-
-    def _render_log(self, parent):
-        log_card = tk.Frame(
-            parent,
-            bg=PALETTE["surface"],
-            highlightbackground=PALETTE["border"],
-            highlightthickness=1,
-        )
-        log_card.grid(row=1, column=0, sticky="nsew")
-        log_card.grid_columnconfigure(0, weight=1)
-        log_card.grid_rowconfigure(1, weight=1)
-
-        tk.Label(
-            log_card,
-            text="Journal d'installation"
-            if self.operation == "install"
-            else "Journal de desinstallation",
-            bg=PALETTE["surface"],
-            fg=PALETTE["text"],
-            font=(GUI_FONT_SEMIBOLD, 11),
-            anchor="w",
-            padx=16,
-            pady=12,
-        ).grid(row=0, column=0, sticky="ew")
-
-        text_wrap = tk.Frame(log_card, bg=PALETTE["surface"])
-        text_wrap.grid(row=1, column=0, sticky="nsew", padx=14, pady=(0, 14))
-        text_wrap.grid_columnconfigure(0, weight=1)
-        text_wrap.grid_rowconfigure(0, weight=1)
-
-        self.log_box = tk.Text(
-            text_wrap,
-            wrap=tk.WORD,
-            bg=PALETTE["log_bg"],
-            fg=PALETTE["text"],
-            insertbackground=PALETTE["text"],
-            font=(GUI_MONO_FONT, 10),
-            relief="flat",
-            padx=14,
-            pady=14,
-            borderwidth=0,
-            highlightthickness=0,
-            spacing1=2,
-            spacing3=2,
-        )
-        self.log_box.grid(row=0, column=0, sticky="nsew")
-        self.log_box.config(state="disabled")
-
-        scrollbar = tk.Scrollbar(text_wrap, orient="vertical", command=self.log_box.yview)
-        scrollbar.grid(row=0, column=1, sticky="ns")
-        self.log_box.configure(yscrollcommand=scrollbar.set)
-
-        self.log_box.tag_config("red", foreground=PALETTE["error"])
-        self.log_box.tag_config("green", foreground=PALETTE["success"])
-        self.log_box.tag_config("cyan", foreground=PALETTE["accent"])
-        self.log_box.tag_config("yellow", foreground=PALETTE["warning"])
-        self.log_box.tag_config("magenta", foreground=PALETTE["magenta"])
-        self.log_box.tag_config("default", foreground=PALETTE["text"])
-
-    def _render_footer(self):
-        footer = tk.Frame(
-            self.screen,
-            bg=PALETTE["surface"],
-            highlightbackground=PALETTE["border"],
-            highlightthickness=1,
-            padx=16,
-            pady=14,
-        )
-        footer.grid(row=2, column=0, sticky="ew", pady=(14, 0))
-        footer.grid_columnconfigure(0, weight=1)
-
-        self.footer_message = tk.Label(
-            footer,
-            text="Le bouton d'ouverture du launcher s'activera quand l'installation sera validee."
-            if self.operation == "install"
-            else "Le bouton de fermeture s'activera quand la desinstallation sera terminee.",
-            bg=PALETTE["surface"],
-            fg=PALETTE["muted"],
-            font=(GUI_FONT, 9),
-        )
-        self.footer_message.grid(row=0, column=0, sticky="w")
-
-        self.launch_button = tk.Button(
-            footer,
-            text="Lancer Minecraft" if self.operation == "install" else "Fermer",
-            command=self.on_open_launcher,
-            state="disabled",
-            bg=PALETTE["button_disabled"],
-            fg=PALETTE["button_disabled_text"],
-            activebackground=PALETTE["button_hover"],
-            activeforeground=PALETTE["text"],
-            disabledforeground=PALETTE["button_disabled_text"],
-            relief="flat",
-            bd=0,
-            padx=18,
-            pady=10,
-            font=(GUI_FONT_SEMIBOLD, 10),
-            cursor="arrow",
-        )
-        self.launch_button.grid(row=0, column=1, sticky="e", padx=(12, 0))
-        self.launch_button.bind("<Enter>", self._on_launch_enter)
-        self.launch_button.bind("<Leave>", self._on_launch_leave)
-
-    def _bind_resize(self):
-        self.root.after(100, lambda: self.set_progress(self.state["progress"]))
-        self.root.bind("<Configure>", lambda _event: self.set_progress(self.state["progress"]))
-
-    def _on_launch_enter(self, _event):
-        if self.launch_button["state"] == "normal":
-            self.launch_button.config(bg=PALETTE["button_hover"])
-
-    def _on_launch_leave(self, _event):
-        if self.launch_button["state"] == "normal":
-            self.launch_button.config(bg=PALETTE["button"])
-
-    def set_progress(self, percent):
-        percent = max(0, min(100, int(percent)))
-        self.state["progress"] = percent
-        self.percent_label.config(text=f"{percent}%")
-        self.root.update_idletasks()
-
-        width = max(self.progress_track.winfo_width(), 1)
-        self.progress_fill.place_configure(width=int(width * percent / 100))
-
-    def set_success_state(self):
-        self.state["status"] = "success"
-        self.status_label.config(
-            text="Installation terminee"
-            if self.operation == "install"
-            else "Desinstallation terminee",
-            fg=PALETTE["success"],
-        )
-        self.helper_label.config(
-            text="Tous les controles sont passes. Tu peux lancer Minecraft quand tu veux."
-            if self.operation == "install"
-            else "La desinstallation demandee est terminee.",
-            fg=PALETTE["success"],
-        )
-        self.progress_track.config(bg=PALETTE["success_dark"])
-        self.progress_fill.config(bg=PALETTE["success"])
-        self.footer_message.config(
-            text="Aucune erreur detectee. Le launcher Minecraft est pret a etre ouvert."
-            if self.operation == "install"
-            else "Aucune erreur detectee. Tu peux fermer l'application.",
-            fg=PALETTE["text"],
-        )
-        self.launch_button.config(
-            state="normal",
-            bg=PALETTE["button"],
-            fg=PALETTE["text"],
-            cursor="hand2",
-        )
-
-    def set_error_state(self):
-        self.state["status"] = "error"
-        self.status_label.config(
-            text="Installation echouee"
-            if self.operation == "install"
-            else "Desinstallation echouee",
-            fg=PALETTE["error"],
-        )
-        self.helper_label.config(
-            text="Corrige l'erreur indiquee dans le journal avant de relancer l'installation."
-            if self.operation == "install"
-            else "Lis l'erreur indiquee dans le journal avant de reessayer.",
-            fg=PALETTE["error"],
-        )
-        self.progress_track.config(bg=PALETTE["error_dark"])
-        self.progress_fill.config(bg=PALETTE["error"])
-        if self.operation == "install":
-            self.footer_message.config(
-                text="Le launcher reste bloque tant que l'installation n'est pas terminee sans erreur.",
-                fg=PALETTE["muted"],
-            )
-            self.launch_button.config(
-                state="disabled",
-                bg=PALETTE["button_disabled"],
-                fg=PALETTE["button_disabled_text"],
-                cursor="arrow",
-            )
+    def set_progress(self, value):
+        value = max(0, min(100, int(value)))
+        self.state["progress"] = value
+        if value == 100 and self.final_size_mb is not None:
+            self.progress_bar.set(value, self.final_size_mb, self.final_size_mb)
         else:
-            self.footer_message.config(
-                text="Une erreur est survenue. Tu peux fermer l'application et reessayer.",
-                fg=PALETTE["text"],
-            )
-            self.launch_button.config(
-                state="normal",
-                bg=PALETTE["button"],
-                fg=PALETTE["text"],
-                cursor="hand2",
-            )
+            self.progress_bar.set(value)
 
-    def append_log(self, message: str, tag: str):
-        self.log_box.config(state="normal")
-        self.log_box.insert(tk.END, message + "\n", tag)
-        self.log_box.config(state="disabled")
-        self.log_box.see(tk.END)
+    def set_download(self, name: str, received: int, total: int | None):
+        self.downloads[name] = received, total
+        current = sum(value[0] for value in self.downloads.values())
+        total = self.total_size_mb
+        if self.active_stage in self.stage_labels:
+            base = self.stage_texts[self.active_stage]
+            self.stage_labels[self.active_stage].config(text=f"{base}\nTéléchargement de : {name}")
+        self.progress_bar.set(self.state.get("progress", 0), _mb(current), total)
+
+    def set_stage(self, text: str, icon: str = ""):
+        label = text.removesuffix("...")
+        self.status.config(text="Installation en cours", fg=PALETTE["text"])
+
+    def set_stage_active(self, key: str, text: str):
+        self.active_stage = key
+        self.set_stage(text)
+        base = self.stage_names.get(key, text.removesuffix("..."))
+        self.stage_texts[key] = base
+        if key not in self.stage_labels:
+            row = tk.Frame(self.checklist, bg=PALETTE["surface_alt"])
+            row.grid(row=self.stage_row, column=0, sticky="ew", pady=4)
+            row.grid_columnconfigure(2, weight=1)
+            state_icon = tk.Label(row, image=self.emoji_images["pending"], bg=PALETTE["surface_alt"])
+            state_icon.grid(row=0, column=0, sticky="n", padx=(0, 8))
+            image_key = f"loader_{self.modpack.loader}" if key == "loader" else key
+            tk.Label(row, image=self.emoji_images.get(image_key), bg=PALETTE["surface_alt"]).grid(row=0, column=1, sticky="n", padx=(0, 8))
+            label = tk.Label(row, text=base, bg=PALETTE["surface_alt"], fg=PALETTE["accent"], font=(GUI_FONT, 11), anchor="w", justify="left")
+            label.grid(row=0, column=2, sticky="ew")
+            self.stage_labels[key] = label
+            self.stage_state_icons[key] = state_icon
+            self.stage_row += 1
+            extra_height = self.stage_row * 38
+            self.stage_extra_height = extra_height
+            self.progress_panel.configure(height=180 + extra_height)
+            self.resize_shell()
+            self.root.update_idletasks()
+
+    def set_stage_done(self, key: str, text: str):
+        if key in self.stage_labels:
+            self.stage_state_icons[key].config(image=self.emoji_images["success"])
+            self.stage_labels[key].config(text=text.strip(), fg=PALETTE["success"])
+        self._write(text)
+
+    def set_stage_skipped(self, key: str, text: str):
+        if key in self.stage_labels:
+            self.stage_state_icons[key].config(image=self.emoji_images["skipped"])
+            self.stage_labels[key].config(text=text.strip(), fg=PALETTE["warning"])
+        self._write(text)
+
+    def set_stage_error(self, message: str):
+        key = self.active_stage
+        if key in self.stage_labels:
+            self.stage_state_icons[key].config(image=self.emoji_images["error"])
+            self.stage_labels[key].config(text=f"{self.stage_texts[key]}\nErreur : {message}", fg=PALETTE["error"])
 
     def process_logs(self):
         while not log_queue.empty():
             data = log_queue.get()
-
-            if data[0] == "clear":
-                self.log_box.config(state="normal")
-                self.log_box.delete("1.0", tk.END)
-                self.log_box.config(state="disabled")
-
+            if data[0] == "progress":
+                self.set_progress(data[1])
+            elif data[0] == "stage":
+                self.set_stage_active(data[1], data[2])
+                self._write(data[2])
+            elif data[0] == "stage_done":
+                self.set_stage_done(data[1], data[2])
+            elif data[0] == "stage_skipped":
+                self.set_stage_skipped(data[1], data[2])
+            elif data[0] == "download":
+                self.set_download(data[1], data[2], data[3])
+            elif data[0] == "size_total":
+                self.final_size_mb = data[1] / 1024 / 1024
+                self.total_size_mb = self.final_size_mb
+                self.size_value.config(text=f"{self.final_size_mb:.1f} Mo")
+                self.progress_bar.set(self.state.get("progress", 0), total=self.final_size_mb)
             elif data[0] == "log":
-                _, msg, tag = data
-                self.append_log(msg, tag)
-
-            elif data[0] == "progress":
-                _, value = data
-                self.set_progress(value)
-
+                self._write(data[1])
+                if data[2] == "fatal":
+                    self.error = data[1]
+                    self.set_stage_error(data[1].removeprefix("Erreur: "))
             elif data[0] == "done":
-                _, status = data
-                self.handle_done(status)
-
-        if self.screen and self.screen.winfo_exists():
+                self.finish(data[1] == "success")
+        if self.screen and self.screen.winfo_exists() and self.state["status"] == "running":
             self.root.after(50, self.process_logs)
 
-    def handle_done(self, status: str):
-        if status == "success":
+    def finish(self, success: bool):
+        self.state["status"] = "success" if success else "error"
+        for button in (self.install, self.settings, self.back):
+            button.grid_remove()
+        if success:
+            self.on_success()
             self.set_progress(100)
-            self.set_success_state()
-            self.append_log(
-                "\nInstallation terminee avec succes. Clique sur le bouton pour ouvrir Minecraft."
-                if self.operation == "install"
-                else "\nDesinstallation terminee avec succes.",
-                "green",
-            )
-        elif status == "error":
-            self.set_error_state()
-            self.append_log(
-                "\nInstallation echouee."
-                if self.operation == "install"
-                else "\nDesinstallation echouee.",
-                "red",
-            )
+            self.status.config(text="Installation terminée", fg=PALETTE["success"])
+            self.message.config(text="Le modpack peut maintenant être lancé.", fg=PALETTE["success"])
+            self.launch.grid(row=0, column=0, padx=6)
+        else:
+            self.status.config(text="Installation échouée", fg=PALETTE["error"])
+            self.message.config(text=self.error or "Une erreur est survenue.", fg=PALETTE["error"])
+            self.set_stage_error((self.error or "Une erreur est survenue.").removeprefix("Erreur: "))
+            self.export.grid(row=0, column=0, padx=6)
+            self.root.after(100, self.open_logs)
+        self.back.config(state="normal", cursor="hand2")
+        self.back.grid(row=0, column=1, padx=6)
+        self._write("Installation terminée." if success else "Installation échouée.")
+
+    def open_logs(self):
+        if self.log_window and self.log_window.winfo_exists():
+            self.log_window.lift()
+            return
+        window = tk.Toplevel(self.root)
+        self.log_window = window
+        window.title("Logs d'installation")
+        window.configure(bg=PALETTE["bg"])
+        window.geometry("760x480")
+        window.minsize(520, 320)
+        body = tk.Frame(window, bg=PALETTE["surface"], padx=16, pady=16)
+        body.pack(fill="both", expand=True, padx=14, pady=14)
+        body.grid_rowconfigure(0, weight=1)
+        body.grid_columnconfigure(0, weight=1)
+        text = tk.Text(body, wrap="word", bg=PALETTE["log_bg"], fg=PALETTE["text"], insertbackground=PALETTE["text"], relief="flat", padx=12, pady=12, font=("Cascadia Mono", 9))
+        self.log_text = text
+        scrollbar = SmoothScrollbar(body, text.yview)
+        text.configure(yscrollcommand=scrollbar.set)
+        text.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        text.insert("1.0", "\n".join(self.log_lines))
+        text.config(state="disabled")
+        actions = tk.Frame(body, bg=PALETTE["surface"])
+        actions.grid(row=1, column=0, columnspan=2, pady=(12, 0))
+        create_button(actions, "Télécharger log.txt", self.export_log, variant="secondary").pack(side="left", padx=5)
+        create_button(actions, "Fermer", window.destroy, variant="secondary").pack(side="left", padx=5)
+        window.protocol("WM_DELETE_WINDOW", window.destroy)
+
+    def export_log(self):
+        target = filedialog.asksaveasfilename(parent=self.root, title="Enregistrer le journal", initialfile="log.txt", defaultextension=".txt", filetypes=(("Journal texte", "*.txt"), ("Journal", "*.log")))
+        if target:
+            Path(target).write_text("\n".join(self.log_lines) + "\n", encoding="utf-8")

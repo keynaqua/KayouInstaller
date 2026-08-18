@@ -8,21 +8,18 @@ from pathlib import Path
 
 from config import (
     INSTALLATIONS_DIR_NAME,
+    DATAPACKS_DIR_NAME,
     MODS_DIR_NAME,
     RESOURCEPACKS_DIR_NAME,
     SHADERPACKS_DIR_NAME,
-    SHORT_HTTP_RETRIES,
-    SHORT_HTTP_TIMEOUT,
     get_installation_dir,
     get_launcher_profiles_path,
     get_minecraft_dir,
-    get_modpack_manifest_url,
-    get_modpack_resourcepacks_url,
-    get_modpack_shaderpacks_url,
 )
 from logger import info, progress, success
-from modpack import ModpackInfo, load_modpack_info
-from utils.http import DownloadError, get_json
+from inventory import Inventory
+from modpack import ModpackInfo, modpack_info_from_catalog
+from utils.files import atomic_write_text
 
 
 class UninstallMode(str, Enum):
@@ -33,52 +30,6 @@ class UninstallMode(str, Enum):
 @dataclass(frozen=True)
 class ManifestFile:
     file_name: str
-
-
-def _required_file_name(entry: dict, label: str) -> str:
-    value = entry.get("file_name")
-    if not isinstance(value, str) or not value.strip():
-        raise RuntimeError(f"{label}: champ 'file_name' invalide")
-    return value.strip()
-
-
-def _load_named_files(url: str, section: str, *fallback_sections: str) -> list[ManifestFile]:
-    data = get_json(url, timeout=SHORT_HTTP_TIMEOUT, retries=SHORT_HTTP_RETRIES)
-    if not isinstance(data, dict):
-        raise RuntimeError(f"Le manifest {section} doit etre un objet JSON")
-
-    raw_items = data.get(section)
-    selected_section = section
-    for fallback in fallback_sections:
-        if isinstance(raw_items, list):
-            break
-        raw_items = data.get(fallback)
-        selected_section = fallback
-
-    if not isinstance(raw_items, list):
-        sections = "', '".join((section, *fallback_sections))
-        raise RuntimeError(f"Le manifest doit contenir une liste '{sections}'")
-
-    files: list[ManifestFile] = []
-    for index, entry in enumerate(raw_items, start=1):
-        if not isinstance(entry, dict):
-            raise RuntimeError(f"{selected_section}[{index}] doit etre un objet")
-        files.append(ManifestFile(_required_file_name(entry, f"{selected_section}[{index}]")))
-    return files
-
-
-def _load_mod_files(modpack_key: str) -> list[ManifestFile]:
-    return _load_named_files(get_modpack_manifest_url(modpack_key), "mods")
-
-
-def _load_optional_named_files(url: str, section: str, *fallback_sections: str) -> list[ManifestFile]:
-    try:
-        return _load_named_files(url, section, *fallback_sections)
-    except DownloadError as exc:
-        text = str(exc)
-        if "404" in text or "Expecting value" in text:
-            return []
-        raise
 
 
 def _safe_child(base: Path, file_name: str) -> Path:
@@ -133,7 +84,7 @@ def _remove_launcher_profile(profile_name: str) -> None:
         return
 
     del profiles[profile_name]
-    launcher_file.write_text(json.dumps(data, indent=4, ensure_ascii=False), encoding="utf-8")
+    atomic_write_text(launcher_file, json.dumps(data, indent=4, ensure_ascii=False))
     info(f"Profil launcher supprime: {profile_name}")
 
 
@@ -143,15 +94,30 @@ def _classic_uninstall(modpack_info: ModpackInfo) -> None:
         info(f"Dossier absent: {game_dir}")
         return
 
+    inventory = Inventory(game_dir, modpack_info.key)
+    if inventory.path.exists():
+        progress(45)
+        categories = ("mods", "resourcepacks", "shaderpacks", "datapacks", "deployed_datapacks")
+        files = [ManifestFile(path) for path in inventory.all_files(categories)]
+        _remove_manifest_files(game_dir, files, "Fichiers du modpack")
+        for category in categories:
+            inventory.sync(category, [])
+        inventory.set_installed(False)
+        progress(100)
+        success("Desinstallation classique terminee. Saves, options et configs conservees.")
+        return
+
     progress(25)
-    info("Chargement des manifests du modpack...")
-    mod_files = _load_mod_files(modpack_info.key)
-    resourcepacks = _load_optional_named_files(get_modpack_resourcepacks_url(modpack_info.key), "packs")
-    shaderpacks = _load_optional_named_files(
-        get_modpack_shaderpacks_url(modpack_info.key),
-        "packs",
-        "shaders",
-    )
+    info("Inventaire absent : nettoyage local des dossiers gérés...")
+
+    def local_files(directory: str) -> list[ManifestFile]:
+        root = game_dir / directory
+        return [ManifestFile(path.name) for path in root.iterdir()] if root.is_dir() else []
+
+    mod_files = local_files(MODS_DIR_NAME)
+    resourcepacks = local_files(RESOURCEPACKS_DIR_NAME)
+    shaderpacks = local_files(SHADERPACKS_DIR_NAME)
+    datapacks = local_files(DATAPACKS_DIR_NAME)
 
     progress(45)
     _remove_manifest_files(game_dir / MODS_DIR_NAME, mod_files, "Mods")
@@ -162,6 +128,10 @@ def _classic_uninstall(modpack_info: ModpackInfo) -> None:
     progress(85)
     _remove_manifest_files(game_dir / SHADERPACKS_DIR_NAME, shaderpacks, "Shaderpacks")
 
+    progress(90)
+    _remove_manifest_files(game_dir / DATAPACKS_DIR_NAME, datapacks, "Datapacks")
+
+    inventory.set_installed(False)
     success("Desinstallation classique terminee. Saves, options et configs conservees.")
 
 
@@ -177,11 +147,10 @@ def _full_uninstall(modpack_info: ModpackInfo) -> None:
     success("Desinstallation complete terminee.")
 
 
-def uninstall_modpack(modpack_name: str, mode: UninstallMode | str) -> None:
+def uninstall_modpack(modpack, mode: UninstallMode | str) -> None:
     selected_mode = UninstallMode(mode)
     progress(5)
-    info(f"Recuperation de modpack.json pour {modpack_name}...")
-    info_data = load_modpack_info(modpack_name)
+    info_data = modpack_info_from_catalog(modpack)
 
     progress(15)
     if selected_mode == UninstallMode.CLASSIC:

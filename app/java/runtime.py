@@ -7,7 +7,6 @@ import winreg
 from pathlib import Path
 
 from config import (
-    ADOPTIUM_INSTALLER_URL,
     JAVA_BIN_DIR_NAME,
     JAVA_COMMAND,
     JAVA_DEFAULT_ROOT,
@@ -15,10 +14,12 @@ from config import (
     JAVA_MAJOR,
     LOG_SUFFIX,
     MSI_SUFFIX,
+    get_adoptium_installer_url,
     get_java_msi_name,
 )
 from logger import info, success
 from utils.http import download_file
+from utils.files import FileProgressCallback, bind_progress
 from utils.process import get_command_output
 from utils.version import parse_java_major
 
@@ -30,18 +31,26 @@ def get_java_major(java_cmd: str = JAVA_COMMAND) -> int | None:
         return None
 
 
-def is_java_ok() -> bool:
+def is_java_ok(major: int = JAVA_MAJOR) -> bool:
     java_path = shutil.which(JAVA_COMMAND)
-    return bool(java_path and get_java_major(java_path) == JAVA_MAJOR)
+    return bool(java_path and get_java_major(java_path) == major)
 
 
-def find_java_bin_default() -> Path | None:
+def find_java_executable(major: int = JAVA_MAJOR) -> Path | None:
+    command = shutil.which(JAVA_COMMAND)
+    if command and get_java_major(command) == major:
+        return Path(command)
+    java_bin = find_java_bin_default(major)
+    return java_bin / JAVA_EXE_NAME if java_bin else None
+
+
+def find_java_bin_default(major: int = JAVA_MAJOR) -> Path | None:
     if not JAVA_DEFAULT_ROOT.exists():
         return None
 
     for child in sorted(JAVA_DEFAULT_ROOT.iterdir(), reverse=True):
         java_exe = child / JAVA_BIN_DIR_NAME / JAVA_EXE_NAME
-        if java_exe.exists() and get_java_major(str(java_exe)) == JAVA_MAJOR:
+        if java_exe.exists() and get_java_major(str(java_exe)) == major:
             return java_exe.parent
     return None
 
@@ -72,11 +81,18 @@ def add_directory_to_user_path(directory: Path) -> None:
     os.environ["PATH"] = directory_str + os.pathsep + os.environ.get("PATH", "")
 
 
-def download_java_msi() -> Path:
+def download_java_msi(
+    major: int = JAVA_MAJOR,
+    callback: FileProgressCallback | None = None,
+) -> Path:
     tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=MSI_SUFFIX)
     tmp_file.close()
-    info(f"Telechargement de Java {JAVA_MAJOR} ({get_java_msi_name()})...")
-    return download_file(ADOPTIUM_INSTALLER_URL, Path(tmp_file.name))
+    info(f"Telechargement de Java {major} ({get_java_msi_name(major)})...")
+    return download_file(
+        get_adoptium_installer_url(major),
+        Path(tmp_file.name),
+        callback=bind_progress(get_java_msi_name(major), callback),
+    )
 
 
 def install_java_silently(msi_path: Path) -> None:
@@ -121,27 +137,30 @@ def is_admin() -> bool:
         return False
 
 
-def ensure_java_in_path_from_default_install() -> bool:
-    java_bin = find_java_bin_default()
+def ensure_java_in_path_from_default_install(major: int = JAVA_MAJOR) -> bool:
+    java_bin = find_java_bin_default(major)
     if not java_bin:
         return False
 
-    info(f"Java {JAVA_MAJOR} detecte au chemin par defaut : {java_bin}")
+    info(f"Java {major} detecte au chemin par defaut : {java_bin}")
     add_directory_to_user_path(java_bin)
     success("Java ajoute au PATH utilisateur.")
     return True
 
 
-def ensure_java_installed() -> None:
-    if is_java_ok():
-        success(f"Java {JAVA_MAJOR} deja installe et disponible dans le PATH.")
-        return
+def ensure_java_installed(
+    major: int = JAVA_MAJOR,
+    download_callback: FileProgressCallback | None = None,
+) -> str:
+    if java := find_java_executable(major):
+        success(f"Java {major} deja installe et disponible dans le PATH.")
+        return str(java)
 
-    if ensure_java_in_path_from_default_install() and is_java_ok():
-        success(f"Java {JAVA_MAJOR} est maintenant disponible.")
-        return
+    if ensure_java_in_path_from_default_install(major) and is_java_ok(major):
+        success(f"Java {major} est maintenant disponible.")
+        return str(find_java_executable(major))
 
-    msi_path = download_java_msi()
+    msi_path = download_java_msi(major, download_callback)
     if not is_admin():
         raise RuntimeError(
             "L'installation de Java necessite des droits administrateur. "
@@ -149,14 +168,14 @@ def ensure_java_installed() -> None:
         )
     install_java_silently(msi_path)
 
-    if is_java_ok():
-        success(f"Java {JAVA_MAJOR} installe avec succes.")
-        return
+    if is_java_ok(major):
+        success(f"Java {major} installe avec succes.")
+        return str(find_java_executable(major))
 
-    if ensure_java_in_path_from_default_install() and is_java_ok():
-        success(f"Java {JAVA_MAJOR} installe et ajoute au PATH.")
-        return
+    if ensure_java_in_path_from_default_install(major) and is_java_ok(major):
+        success(f"Java {major} installe et ajoute au PATH.")
+        return str(find_java_executable(major))
 
     raise RuntimeError(
-        f"Java {JAVA_MAJOR} a ete installe, mais n'est toujours pas detecte correctement."
+        f"Java {major} a ete installe, mais n'est toujours pas detecte correctement."
     )

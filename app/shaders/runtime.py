@@ -1,155 +1,92 @@
 from __future__ import annotations
 
-import ctypes
-import hashlib
-from dataclasses import dataclass
 from pathlib import Path
 
 from config import (
-    GUI_SHADER_MESSAGEBOX_FLAGS,
-    HASH_CHUNK_SIZE,
     SHADERPACKS_DIR_NAME,
-    SHADERPACK_SUFFIXES,
     SHORT_HTTP_RETRIES,
     SHORT_HTTP_TIMEOUT,
-    get_modpack_shaderpacks_url,
 )
 from logger import shader, success
-from utils.http import DownloadError, download_file, get_json
+from packs import Pack, parse_pack_manifest, sync_packs
+from utils.files import FileProgressCallback, atomic_write_text
+from utils.http import DownloadError, get_json
 from utils.progress import ProgressCallback, RangedProgress
 
 SHADERPACK_PROGRESS_START = 80
 SHADERPACK_PROGRESS_END = 90
 
 
-@dataclass
-class ShaderPack:
-    file_name: str
-    download_url: str
-    sha256: str
+ShaderPack = Pack
 
 
-def _sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as file:
-        while chunk := file.read(HASH_CHUNK_SIZE):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def _required_string(entry: dict, field: str, label: str) -> str:
-    value = entry.get(field)
-    if not isinstance(value, str) or not value.strip():
-        raise RuntimeError(f"{label}: champ '{field}' invalide")
-    return value.strip()
-
-
-def _load_manifest(modpack_key: str) -> list[ShaderPack]:
+def load_shaderpack_manifest(manifest_url: str, cache_version: str = "") -> list[ShaderPack]:
     try:
         data = get_json(
-            get_modpack_shaderpacks_url(modpack_key),
+            manifest_url,
             timeout=SHORT_HTTP_TIMEOUT,
             retries=SHORT_HTTP_RETRIES,
+            cache_key=cache_version,
         )
     except DownloadError as exc:
-        text = str(exc)
-        if "404" in text or "Expecting value" in text:
-            shader("Aucun manifest shaderpacks exploitable.")
-            return []
-        raise
+        shader(f"Shaderpacks ignorés : {exc}")
+        return []
 
-    if not isinstance(data, dict):
-        raise RuntimeError("Le manifest shaderpacks doit etre un objet JSON")
-
-    raw_packs = data.get("packs", data.get("shaders", []))
-    if not isinstance(raw_packs, list):
-        raise RuntimeError("Le manifest shaderpacks doit contenir une liste 'packs'")
-
-    packs: list[ShaderPack] = []
-    for index, entry in enumerate(raw_packs, start=1):
-        if not isinstance(entry, dict):
-            raise RuntimeError(f"packs[{index}] doit etre un objet")
-        label = f"packs[{index}]"
-        packs.append(
-            ShaderPack(
-                file_name=_required_string(entry, "file_name", label),
-                download_url=_required_string(entry, "download_url", label),
-                sha256=_required_string(entry, "sha256", label).lower(),
-            )
-        )
-    return packs
-
-
-def _local_shaderpacks(shaderpacks_dir: Path) -> dict[str, Path]:
-    shaderpacks_dir.mkdir(parents=True, exist_ok=True)
-    return {
-        path.name.lower(): path
-        for path in shaderpacks_dir.iterdir()
-        if path.is_file() and path.suffix.lower() in SHADERPACK_SUFFIXES
-    }
-
-
-def _ask_install_defaults() -> bool:
-    result = ctypes.windll.user32.MessageBoxW(
-        None,
-        "Des shaders sont deja presents.\n\n"
-        "Installer les shaders par defaut du modpack a cote de ceux deja presents ?",
-        "KayouInstaller - Shaders",
-        GUI_SHADER_MESSAGEBOX_FLAGS,
+    return parse_pack_manifest(
+        data,
+        "shaderpacks.json",
+        False,
+        ("packs", "shaders"),
+        True,
     )
-    return result == 6
+
+
+def activate_shader(game_dir: Path, packs: list[ShaderPack], enabled: bool = True) -> None:
+    path = game_dir / "config" / "iris.properties"
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    active = next(
+        (pack.file_name for pack in packs if enabled and pack.active and (game_dir / SHADERPACKS_DIR_NAME / pack.file_name).is_file()),
+        "",
+    )
+    values = {"enableShaders": str(bool(active)).lower(), "shaderPack": active}
+    output = []
+    found = set()
+    for line in lines:
+        key = line.split("=", 1)[0]
+        if key in values:
+            output.append(f"{key}={values[key]}")
+            found.add(key)
+        else:
+            output.append(line)
+    output.extend(f"{key}={value}" for key, value in values.items() if key not in found)
+    atomic_write_text(path, "\n".join(output) + "\n")
 
 
 def ensure_shaders_installed(
     game_dir: str | Path,
     modpack_key: str,
     progress_callback: ProgressCallback | None = None,
-) -> None:
+    download_callback: FileProgressCallback | None = None,
+    manifest: list[ShaderPack] | None = None,
+) -> list[str]:
     game_path = Path(game_dir)
     shaderpacks_dir = game_path / SHADERPACKS_DIR_NAME
 
     shader("Chargement du manifest shaderpacks...")
-    packs = _load_manifest(modpack_key)
+    packs = manifest if manifest is not None else load_shaderpack_manifest(modpack_key)
     if not packs:
         RangedProgress(progress_callback, SHADERPACK_PROGRESS_START, SHADERPACK_PROGRESS_END, 0).finish()
         success("Configuration des shaderpacks terminee !")
-        return
+        return []
 
-    ranged_progress = RangedProgress(
+    sync_packs(
+        shaderpacks_dir,
+        packs,
+        shader,
         progress_callback,
+        download_callback,
         SHADERPACK_PROGRESS_START,
         SHADERPACK_PROGRESS_END,
-        len(packs),
     )
-
-    local = _local_shaderpacks(shaderpacks_dir)
-    wanted_names = {pack.file_name.lower() for pack in packs}
-    missing_defaults = [pack for pack in packs if pack.file_name.lower() not in local]
-    other_shaders = [path for name, path in local.items() if name not in wanted_names]
-
-    if missing_defaults and other_shaders and not _ask_install_defaults():
-        shader("Shaders par defaut ignores.")
-        ranged_progress.finish()
-        success("Configuration des shaderpacks terminee !")
-        return
-
-    for pack in packs:
-        target = shaderpacks_dir / pack.file_name
-
-        if target.exists() and _sha256(target) == pack.sha256:
-            shader(f"OK {pack.file_name}")
-            ranged_progress.advance()
-            continue
-
-        if target.exists():
-            shader(f"Update {pack.file_name}")
-            target.unlink()
-        else:
-            shader(f"Install {pack.file_name}")
-
-        download_file(pack.download_url, target)
-        ranged_progress.advance()
-
-    ranged_progress.finish()
-
     success("Configuration des shaderpacks terminee !")
+    return [pack.file_name for pack in packs]

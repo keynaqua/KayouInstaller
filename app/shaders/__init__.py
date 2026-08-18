@@ -1,3 +1,3 @@
-from .runtime import ensure_shaders_installed
+from .runtime import activate_shader, ensure_shaders_installed, load_shaderpack_manifest
 
-__all__ = ["ensure_shaders_installed"]
+__all__ = ["activate_shader", "ensure_shaders_installed", "load_shaderpack_manifest"]

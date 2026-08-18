@@ -17,6 +17,7 @@ from config import (
 )
 from logger import neoforge, success
 from utils.http import download_file, get_text
+from utils.files import FileProgressCallback, bind_progress
 
 
 def _parse_version_tuple(version: str) -> tuple[int, ...]:
@@ -91,9 +92,13 @@ def get_installed_neoforge_version_id(mc_dir: Path, mc_version: str) -> str:
     return candidates[-1][1]
 
 
-def run_neoforge_installer(jar_path: Path, mc_dir: Path) -> None:
+def run_neoforge_installer(
+    jar_path: Path,
+    mc_dir: Path,
+    java_command: str = JAVA_COMMAND,
+) -> None:
     for args in NEOFORGE_INSTALL_CLIENT_ARGS:
-        cmd = [JAVA_COMMAND, "-jar", str(jar_path), *args, str(mc_dir)]
+        cmd = [java_command, "-jar", str(jar_path), *args, str(mc_dir)]
         neoforge(f"Lancement de l'installateur NeoForge ({' '.join(args)})...")
         result = subprocess.run(cmd, check=False)
         if result.returncode == 0:
@@ -112,7 +117,12 @@ def resolve_neoforge_version(mc_version: str, requested_version: str) -> str:
     return requested_version
 
 
-def ensure_neoforge_installed(mc_version: str, requested_version: str = LATEST_VERSION) -> str:
+def ensure_neoforge_installed(
+    mc_version: str,
+    requested_version: str = LATEST_VERSION,
+    download_callback: FileProgressCallback | None = None,
+    java_command: str = JAVA_COMMAND,
+) -> str:
     mc_dir = get_minecraft_dir()
 
     neoforge(f"Dossier Minecraft : {mc_dir}")
@@ -131,8 +141,12 @@ def ensure_neoforge_installed(mc_version: str, requested_version: str = LATEST_V
     neoforge("NeoForge absent ou pas a jour. Installation en cours...")
     with tempfile.TemporaryDirectory() as tmp_dir:
         jar_path = Path(tmp_dir) / get_neoforge_installer_name(expected_version)
-        download_file(get_neoforge_installer_url(expected_version), jar_path)
-        run_neoforge_installer(jar_path, mc_dir)
+        download_file(
+            get_neoforge_installer_url(expected_version),
+            jar_path,
+            callback=bind_progress(jar_path.name, download_callback),
+        )
+        run_neoforge_installer(jar_path, mc_dir, java_command)
 
     installed_version = find_installed_neoforge_version(mc_dir, mc_version)
     if installed_version != expected_version:

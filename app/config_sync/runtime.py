@@ -1,104 +1,112 @@
 from __future__ import annotations
 
-import shutil
-import tempfile
+from dataclasses import dataclass
 from pathlib import Path
-from zipfile import ZipFile
 
-from config import (
-    CONFIG_DIR_NAME,
-    REMOTE_CONFIG_DIR_NAME,
-    get_install_subdir,
-)
+from config import CONFIG_DIR_NAME, SHORT_HTTP_RETRIES, SHORT_HTTP_TIMEOUT, get_install_subdir
 from logger import info, success
-from utils.http import download_file
+from utils.files import FileProgressCallback, VerifiedDownload, download_many, safe_relative_path, validate_digest, validate_format, validate_url
+from utils.http import get_json
 
 
 class ConfigSyncError(RuntimeError):
     pass
 
 
-def _github_zip_url(owner: str, repo: str, branch: str) -> str:
-    return f"https://github.com/{owner}/{repo}/archive/refs/heads/{branch}.zip"
+@dataclass(frozen=True)
+class ConfigFile:
+    path: Path
+    sha256: str
+    mode: str
+    enabled: bool
+    download_url: str
+
+
+@dataclass(frozen=True)
+class ConfigManifest:
+    files: list[ConfigFile]
+
+
+@dataclass(frozen=True)
+class ConfigResult:
+    files: list[str]
+    managed: list[str]
+
+
+def _required(entry: dict, field: str, label: str) -> str:
+    value = entry.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise RuntimeError(f"{label}: champ '{field}' invalide")
+    return value.strip()
+
+
+def load_config_manifest(manifest_url: str, cache_version: str = "") -> ConfigManifest | None:
+    if not manifest_url:
+        return None
+    data = get_json(manifest_url, timeout=SHORT_HTTP_TIMEOUT, retries=SHORT_HTTP_RETRIES, cache_key=cache_version)
+    if not isinstance(data, dict):
+        raise RuntimeError("configs.json doit être un objet JSON")
+    validate_format(data, "configs.json")
+    raw_files = data.get("files", [])
+    if not isinstance(raw_files, list):
+        raise RuntimeError("configs.json: files doit être une liste")
+    if data.get("directories"):
+        raise RuntimeError("configs.json: les dossiers doivent être développés en fichiers par build_catalog.py")
+
+    files = []
+    for index, entry in enumerate(raw_files, start=1):
+        label = f"files[{index}]"
+        if not isinstance(entry, dict):
+            raise RuntimeError(f"{label}: entrée invalide")
+        path = safe_relative_path(_required(entry, "path", label), label)
+        mode = str(entry.get("mode", "preserve")).strip().lower()
+        if mode not in {"managed", "preserve", "optional"}:
+            raise RuntimeError(f"{label}: mode invalide")
+        files.append(ConfigFile(
+            path=path,
+            sha256=validate_digest(_required(entry, "sha256", label), "sha256", label),
+            mode=mode,
+            enabled=entry.get("enabled") is True,
+            download_url=validate_url(_required(entry, "download_url", label), label),
+        ))
+    paths = [item.path.as_posix().casefold() for item in files]
+    if len(paths) != len(set(paths)):
+        raise RuntimeError("configs.json contient des chemins dupliqués")
+    return ConfigManifest(files)
 
 
 def sync_config_folder(
-    owner: str,
-    repo: str,
-    branch: str,
     installation_name: str,
     target_subdir: str = CONFIG_DIR_NAME,
-) -> Path:
-    source_dir = REMOTE_CONFIG_DIR_NAME.strip("/")
-
-    target_root = get_install_subdir(
-        installation_name,
-        target_subdir,
-    )
-
+    download_callback: FileProgressCallback | None = None,
+    manifest: ConfigManifest | None = None,
+) -> ConfigResult:
+    target_root = get_install_subdir(installation_name, target_subdir)
     target_root.mkdir(parents=True, exist_ok=True)
+    if manifest is None:
+        success("Aucune config distante à synchroniser.")
+        return ConfigResult([], [])
 
-    info(f" - [CONFIG] Source GitHub: {owner}/{repo}@{branch}/{source_dir}")
-    info(f" - [CONFIG] Dossier cible: {target_root}")
-
-    zip_url = _github_zip_url(owner, repo, branch)
-
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        tmp_path = Path(tmp_dir)
-
-        zip_path = tmp_path / "repo.zip"
-
-        try:
-            info(" - [CONFIG] Telechargement de l'archive GitHub...")
-            download_file(zip_url, zip_path)
-
-            extract_dir = tmp_path / "extract"
-            extract_dir.mkdir(parents=True, exist_ok=True)
-
-            info(" - [CONFIG] Extraction de l'archive...")
-            with ZipFile(zip_path, "r") as zip_ref:
-                zip_ref.extractall(extract_dir)
-
-        except Exception as exc:
-            raise ConfigSyncError(
-                f"Impossible de telecharger/extract l'archive GitHub: {exc}"
-            ) from exc
-
-        extracted_dirs = [p for p in extract_dir.iterdir() if p.is_dir()]
-
-        if not extracted_dirs:
-          raise ConfigSyncError(
-             "Aucun dossier trouve dans l'archive GitHub"
-         )
-
-        repo_root = extracted_dirs[0]
-
-        source_root = repo_root / source_dir
-
-        if not source_root.exists():
-            info(" - [CONFIG] Aucun dossier config trouve dans le repo.")
-            return target_root
-
-        files = [p for p in source_root.rglob("*") if p.is_file()]
-
-        if not files:
-            info(" - [CONFIG] Aucun fichier trouve dans le dossier config.")
-            return target_root
-
-        for src_file in files:
-            relative_path = src_file.relative_to(source_root)
-            dst_file = target_root / relative_path
-
-            dst_file.parent.mkdir(parents=True, exist_ok=True)
-
-            if dst_file.exists():
-                info(f" - [CONFIG] Conserve existant: {relative_path}")
+    try:
+        installed = []
+        managed = []
+        downloads = []
+        for item in manifest.files:
+            target = target_root / item.path
+            if item.mode == "optional" and not item.enabled:
+                info(f" - [CONFIG] Optionnelle ignorée: {item.path}")
                 continue
-
-            info(f" - [CONFIG] Ajout: {relative_path}")
-
-            shutil.copy2(src_file, dst_file)
-
-    success("Config synchronisee avec succes.")
-
-    return target_root
+            if item.mode in {"preserve", "optional"} and target.exists():
+                info(f" - [CONFIG] Conservée: {item.path}")
+            else:
+                info(f" - [CONFIG] Synchronisation: {item.path}")
+                downloads.append(VerifiedDownload(item.download_url, target, "sha256", item.sha256))
+            relative = (Path(CONFIG_DIR_NAME) / item.path).as_posix()
+            installed.append(relative)
+            if item.mode == "managed":
+                managed.append(relative)
+        download_many(downloads, download_callback)
+        success("Configs synchronisées avec succès.")
+        return ConfigResult(installed, managed)
+    except Exception as exc:
+        raise ConfigSyncError(f"Synchronisation des configs impossible: {exc}") from exc
