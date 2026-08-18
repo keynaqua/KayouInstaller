@@ -6,14 +6,11 @@ JAVA_MAJOR = 21
 
 VERSION = "4.0.0"
 
-GITHUB_OWNER = "keynaqua"
 APP_BASENAME = "KayouInstaller"
-GITHUB_REPO = "KayouInstaller"
 
 MODPACK_CATALOG_URL = "https://kayou-modpacks.pages.dev/catalog.json"
 
 # ----- Paths ----- #
-TEMP_DIR = Path("./tmp")
 MINECRAFT_DIR_NAME = ".minecraft"
 INSTALLATIONS_DIR_NAME = ".installations"
 LAUNCHER_PROFILES_FILE = "launcher_profiles.json"
@@ -102,7 +99,6 @@ LAUNCHER_NEOFORGE = "neoforge"
 LATEST_VERSION = "latest"
 GUI_FONT = "Segoe UI Variable Text"
 GUI_FONT_SEMIBOLD = "Segoe UI Semibold"
-GUI_MONO_FONT = "Cascadia Mono"
 GUI_MESSAGEBOX_TOPMOST = True
 DARK_PALETTE = {
     "bg": "#0b1220",

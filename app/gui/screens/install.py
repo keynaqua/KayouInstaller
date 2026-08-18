@@ -1,5 +1,4 @@
 import os
-import shutil
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path

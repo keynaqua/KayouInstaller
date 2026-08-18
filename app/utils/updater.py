@@ -1,3 +1,4 @@
+import os
 import re
 import subprocess
 import sys
@@ -121,6 +122,9 @@ def write_replacement_script(new_exe: Path, target_exe: Path, old_exe: Path) -> 
                 "",
                 ":launch",
                 'if /I not "%OLD%"=="%TARGET%" del "%OLD%" >nul 2>nul',
+                'set "PYINSTALLER_RESET_ENVIRONMENT=1"',
+                'set "_PYI_APPLICATION_HOME_DIR="',
+                'set "_MEIPASS2="',
                 'start "" "%TARGET%"',
                 'del "%~f0" >nul 2>nul',
                 "exit /b 0",
@@ -140,12 +144,21 @@ def launch_replacement_script(script: Path) -> None:
     if sys.platform == "win32":
         creationflags = subprocess.CREATE_NO_WINDOW
 
+    environment = dict(os.environ)
+    # The updater is an independent frozen application launch, not a child
+    # worker of the current PyInstaller process. Without this reset, the new
+    # executable can reuse the old _MEI directory while it is being deleted.
+    environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    environment.pop("_PYI_APPLICATION_HOME_DIR", None)
+    environment.pop("_MEIPASS2", None)
+
     subprocess.Popen(
         ["cmd.exe", "/c", str(script)],
         cwd=str(script.parent),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         creationflags=creationflags,
+        env=environment,
     )
 
 

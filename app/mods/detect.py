@@ -18,7 +18,6 @@ class InstalledMod:
     version: str
     file_path: Path
     sha1: str | None = None
-    git_blob_sha: str | None = None
 
 
 @dataclass
@@ -35,21 +34,10 @@ def sha1_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def git_blob_sha(path: Path) -> str:
-    raw = path.read_bytes()
-    return hashlib.sha1(f"blob {len(raw)}\0".encode() + raw).hexdigest()
-
-
 def ensure_sha1(mod: InstalledMod) -> str:
     if mod.sha1 is None:
         mod.sha1 = sha1_file(mod.file_path)
     return mod.sha1
-
-
-def ensure_git_blob_sha(mod: InstalledMod) -> str:
-    if mod.git_blob_sha is None:
-        mod.git_blob_sha = git_blob_sha(mod.file_path)
-    return mod.git_blob_sha
 
 
 def _escape_control_chars(text: str) -> str:
